@@ -450,4 +450,60 @@ UCS_F_DEVICE ucs_status_t ucp_device_progress_req(ucp_device_request_t *req)
     return req->status;
 }
 
+/**
+ * @ingroup UCP_DEVICE
+ * @brief Updates a signal memory 
+ *
+ * This device routine updates a signal memory area with immediate data using memory descriptor
+ * list handle. The @ref mem_list_index is used to point at the @a mem_list
+ * entry to be used for the update operation. The remote offset must be
+ * valid for the used @a mem_list entry.
+ *
+ * The routine returns a request that can be progressed and checked for
+ * completion with @ref ucp_device_progress_req.
+ *
+ * This routine can be called repeatedly with the same handle and different
+ * imm_data. The flags parameter can be used to modify the behavior of the
+ * routine.
+ *
+ * @tparam      level           Level of cooperation of the transfer.
+ * @param [in]  mem_list_h      Memory descriptor list handle to use.
+ * @param [in]  mem_list_index  Index in descriptor list pointing to the memory
+ *                              remote key to use for the put operation.
+ * @param [in]  imm_data        Immediate data to send.
+ * @param [in]  remote_offset   Remote offset to perform the put to.
+ * @param [in]  channel_id      Channel ID to use for the transfer.
+ * @param [in]  flags           Flags usable to modify the function behavior.
+ * @param [out] req             Request populated by the call.
+ *
+ * @return UCS_INPROGRESS     - Operation successfully posted. If @a req is not
+ *                              NULL, use @ref ucp_device_progress_req to check
+ *                              for completion.
+ * @return UCS_OK             - Operation completed successfully.
+ * @return Error code as defined by @ref ucs_status_t
+ */
+ template<ucs_device_level_t level = UCS_DEVICE_LEVEL_THREAD>
+ UCS_F_DEVICE ucs_status_t ucp_device_signal_update(
+         ucp_device_mem_list_handle_h mem_list_h, unsigned mem_list_index,
+         uint64_t imm_data, size_t remote_offset,
+         uint64_t flags, ucp_device_request_t *req)
+ {
+    const void *address = mem_list_h->local_addrs[mem_list_index];
+     uint64_t remote_address = mem_list_h->remote_addrs[mem_list_index] +
+                               remote_offset;
+     const uct_device_mem_element_t *uct_elem;
+     uct_device_completion_t *comp;
+     uct_device_ep_t *device_ep;
+     ucs_status_t status;
+ 
+     status = ucp_device_prepare_send(mem_list_h, mem_list_index, req, device_ep,
+                                      uct_elem, comp);
+     if (status != UCS_OK) {
+         return status;
+     }
+ 
+     return UCP_DEVICE_SEND_BLOCKING(level, uct_device_ep_put_with_imm, device_ep,
+                                     req, uct_elem, imm_data, remote_address,
+                                     flags, comp, address);
+ }
 #endif /* UCP_DEVICE_IMPL_H */
