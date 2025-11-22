@@ -235,6 +235,37 @@ UCS_F_DEVICE void uct_rc_mlx5_gda_wqe_prepare_put_or_atomic(
     doca_gpu_dev_verbs_store_wqe_seg(dseg_ptr, (uint64_t*)&(dseg));
 }
 
+UCS_F_DEVICE void uct_rc_mlx5_gda_wqe_prepare_put_with_imm(
+    uct_rc_gdaki_dev_ep_t *ep, void *wqe_ptr, uint16_t wqe_idx,
+    unsigned ctrl_flags, uint64_t raddr, uint32_t rkey,
+    uint32_t imm_data, uint32_t bytes, uint32_t lkey, uint64_t laddr)
+{
+    uint64_t *dseg_ptr  = (uint64_t*)wqe_ptr + 4;
+    uint64_t *cseg_ptr  = (uint64_t*)wqe_ptr;
+    uint64_t *rseg_ptr  = (uint64_t*)wqe_ptr + 2;
+    int ds              = 3;
+    struct doca_gpu_dev_verbs_wqe_ctrl_seg cseg;
+    struct mlx5_wqe_raddr_seg rseg;
+    struct mlx5_wqe_data_seg dseg;
+
+    cseg.opmod_idx_opcode = doca_gpu_dev_verbs_bswap32(
+            ((uint32_t)wqe_idx << DOCA_GPUNETIO_VERBS_WQE_IDX_SHIFT) | MLX5_OPCODE_RDMA_WRITE_IMM);
+    cseg.qpn_ds           = doca_gpu_dev_verbs_bswap32((ep->sq_num << 8) | ds);
+    cseg.fm_ce_se         = ctrl_flags;
+    cseg.imm         = doca_gpu_dev_verbs_bswap32(imm_data);
+
+    rseg.raddr = doca_gpu_dev_verbs_bswap64(raddr);
+    rseg.rkey  = rkey;
+
+    dseg.byte_count = doca_gpu_dev_verbs_bswap32(bytes);
+    dseg.lkey       = lkey;
+    dseg.addr       = doca_gpu_dev_verbs_bswap64(laddr);
+
+    doca_gpu_dev_verbs_store_wqe_seg(cseg_ptr, (uint64_t*)&(cseg));
+    doca_gpu_dev_verbs_store_wqe_seg(rseg_ptr, (uint64_t*)&(rseg));
+    doca_gpu_dev_verbs_store_wqe_seg(dseg_ptr, (uint64_t*)&(dseg));
+}
+
 UCS_F_DEVICE void uct_rc_mlx5_gda_lock(int *lock) {
     while (atomicCAS(lock, 0, 1) != 0)
         ;
@@ -290,7 +321,7 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_single(
         const void *address, uint32_t lkey, uint64_t remote_address,
         uint32_t rkey, size_t length, uint64_t flags,
         uct_device_completion_t *tl_comp, uint32_t opcode, bool is_atomic,
-        uint64_t add)
+        uint64_t add, bool is_put_with_imm=false, uint32_t imm_data=0)
 {
     uct_rc_gda_completion_t *comp = &tl_comp->rc_gda;
     unsigned cflag                = 0;
@@ -313,11 +344,17 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_single(
             }
         }
 
-        uct_rc_mlx5_gda_wqe_prepare_put_or_atomic(
+        if (is_put_with_imm) {
+            uct_rc_mlx5_gda_wqe_prepare_put_with_imm(ep, uct_rc_mlx5_gda_get_wqe_ptr(ep, wqe_idx), wqe_idx,
+                cflag, remote_address, rkey,
+                imm_data, length, lkey, reinterpret_cast<uint64_t>(address));
+        } else {
+            uct_rc_mlx5_gda_wqe_prepare_put_or_atomic(
                 ep, uct_rc_mlx5_gda_get_wqe_ptr(ep, wqe_idx), wqe_idx,
                 opcode, cflag, remote_address, rkey,
                 reinterpret_cast<uint64_t>(address), lkey, length, is_atomic,
                 add);
+        }
     }
 
     uct_rc_mlx5_gda_sync<level>();
@@ -595,5 +632,24 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_check_completion(
 
     return UCS_OK;
 }
+
+template<ucs_device_level_t level>
+UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_put_with_imm(
+        uct_device_ep_h tl_ep, const uct_device_mem_element_t *tl_mem_elem,
+        uint64_t imm_data, uint64_t remote_address, uint64_t flags,
+        uct_device_completion_t *comp, const void *address)
+{
+    auto ep       = reinterpret_cast<uct_rc_gdaki_dev_ep_t*>(tl_ep);
+    auto mem_elem = reinterpret_cast<const uct_rc_gdaki_device_mem_element_t*>(
+            tl_mem_elem);
+
+    return uct_rc_mlx5_gda_ep_single<level>(ep, tl_mem_elem, address, mem_elem->lkey, remote_address,
+                                            mem_elem->rkey, 0,
+                                            flags, comp, MLX5_OPCODE_RDMA_WRITE_IMM,
+                                            false, 0, true, imm_data);
+    
+}
+
+
 
 #endif
