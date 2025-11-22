@@ -302,4 +302,44 @@ UCS_F_DEVICE ucs_status_t uct_device_ep_check_completion(
     return UCS_ERR_UNSUPPORTED;
 }
 
+/**
+ * @ingroup UCT_DEVICE
+ * @brief Posts one memory put operation with immediate data.
+ *
+ * This device routine posts a single memory put operation with immediate data using the
+ * device endpoint @a device_ep. The memory element @a mem_elem must be valid and
+ * contain the remote memory region to be put to.
+ *
+ * User can pass @a comp to track execution and completion status.
+ * The @a flags parameter can be used to modify the behavior
+ * of the routine.
+ *
+ * @param [in]  device_ep       Device endpoint to be used for the operation.
+ * @param [in]  mem_elem        Memory element representing the memory to be put to.
+ * @param [in]  imm_data        Immediate data to send.
+ * @param [in]  remote_address  Remote virtual address to put to.
+ * @param [in]  flags           Flags to modify the function behavior.
+ * @param [in]  comp            Completion object to track the progress of operation.
+ *
+ * @return UCS_INPROGRESS      - Operation successfully posted, use @ref
+ *                               uct_device_ep_progress and @ref
+ *                               uct_device_ep_check_completion to check
+ *                               for completion.
+ * @return UCS_OK              - Operation completed successfully.
+ * @return Error code as defined by @ref ucs_status_t
+ */
+ template<ucs_device_level_t level>
+ UCS_F_DEVICE ucs_status_t uct_device_ep_put_with_imm(
+         uct_device_ep_h device_ep, const uct_device_mem_element_t *mem_elem,
+         uint64_t imm_data, uint64_t remote_address, uint64_t flags,
+         uct_device_completion_t *comp, const void *address)
+ {
+     if (device_ep->uct_tl_id == UCT_DEVICE_TL_RC_MLX5_GDA) {
+         return uct_rc_mlx5_gda_ep_put_with_imm<level>(device_ep, mem_elem,
+                                                     imm_data, remote_address,
+                                                     flags, comp, address);
+     }
+     return UCS_ERR_UNSUPPORTED;
+ }
+
 #endif
