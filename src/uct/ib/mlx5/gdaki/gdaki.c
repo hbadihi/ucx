@@ -97,14 +97,13 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
         return status;
     }
 
-    init_attr.cq_len[UCT_IB_DIR_TX] = 1;
+    iface->super.super.config.tx_qp_len = 64;
+    init_attr.cq_len[UCT_IB_DIR_TX] = iface->super.super.config.tx_qp_len;
     uct_ib_mlx5_cq_calc_sizes(&iface->super.super.super, UCT_IB_DIR_TX,
                               &init_attr, 0, &cq_attr);
     uct_rc_iface_fill_attr(&iface->super.super, &qp_attr.super,
                            iface->super.super.config.tx_qp_len, NULL);
     uct_ib_mlx5_wq_calc_sizes(&qp_attr);
-
-    cq_attr.flags      |= UCT_IB_MLX5_CQ_IGNORE_OVERRUN;
 
     qp_attr.mmio_mode     = UCT_IB_MLX5_MMIO_MODE_DB;
     qp_attr.super.srq_num = 0;
@@ -397,7 +396,12 @@ uct_rc_gdaki_ep_get_device_ep(uct_ep_h tl_ep, uct_device_ep_h *device_ep_p)
         dev_ep.sq_fc_mask     = (max_tx >> 1) - 1;
 
         dev_ep.cqe_daddr      = UCS_PTR_BYTE_OFFSET(ep->ep_gpu, cq_umem_offset);
+        dev_ep.cq_ci          = 0;
         dev_ep.cqe_num        = cq_size;
+        dev_ep.cqe_size_log   = ep->cq.cqe_size_log;
+        dev_ep.cq_length_log  = ep->cq.cq_length_log;
+        dev_ep.cq_lock        = 0;
+        memset(&dev_ep.last_cqe, 0, sizeof(dev_ep.last_cqe));
         dev_ep.sq_db          = ep->sq_db;
 
         status = UCT_CUDADRV_FUNC_LOG_ERR(cuMemcpyHtoD(

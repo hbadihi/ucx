@@ -7,6 +7,7 @@
 #define UCT_GDAKI_DEV_H
 
 #include <uct/api/device/uct_device_types.h>
+#include <infiniband/mlx5dv.h>
 
 
 typedef struct {
@@ -25,7 +26,12 @@ typedef struct {
     uint32_t                     *sq_dbrec;
     uint64_t                     *sq_db;
     uint8_t                      *cqe_daddr;
-    uint32_t                     cqe_num;
+    uint32_t                     cq_ci;          /* CQ consumer index */
+    uint32_t                     cqe_num;        /* Number of CQEs */
+    uint8_t                      cqe_size_log;   /* Log2 of CQE size */
+    uint8_t                      cq_length_log;  /* Log2 of CQ length */
+    int                          cq_lock;        /* CQ polling lock */
+    struct mlx5_cqe64            last_cqe;       /* Last consumed CQE (cached) */
     uint16_t                     sq_wqe_num;
     uint32_t                     sq_num;
     uint16_t                     sq_fc_mask;

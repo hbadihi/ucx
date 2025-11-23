@@ -52,6 +52,20 @@ uct_rc_mlx5_gda_update_dbr(uct_rc_gdaki_dev_ep_t *ep, uint32_t prod_index)
     dbrec_ptr_aref.store(dbrec_val, cuda::std::memory_order_relaxed);
 }
 
+UCS_F_DEVICE void
+uct_rc_mlx5_gda_update_cq_dbrec(uct_rc_gdaki_dev_ep_t *ep, uint32_t cons_index)
+{
+    /* CQ doorbell record update - consumer index only, no MMIO needed.
+     * Index 0 (UCT_IB_MLX5_CQ_SET_CI) is for consumer index updates during polling.
+     * Index 1 (UCT_IB_MLX5_CQ_ARM_DB) is only needed for CQ arming (event-driven),
+     * which GDAKI doesn't use. */
+    __be32 dbrec_val = doca_gpu_dev_verbs_bswap32(cons_index & 0xffffff);
+    
+    cuda::atomic_ref<__be32, cuda::thread_scope_system> dbrec_aref(
+            ep->cq_dbrec[0]);
+    dbrec_aref.store(dbrec_val, cuda::std::memory_order_relaxed);
+}
+
 template<ucs_device_level_t level>
 UCS_F_DEVICE void
 uct_rc_mlx5_gda_exec_init(unsigned &lane_id, unsigned &num_lanes)
@@ -93,6 +107,23 @@ template<ucs_device_level_t level> UCS_F_DEVICE void uct_rc_mlx5_gda_sync(void)
     }
 }
 
+UCS_F_DEVICE void uct_rc_mlx5_gda_unlock(int *lock) {
+    cuda::atomic_ref<int, cuda::thread_scope_device> lock_aref(*lock);
+    lock_aref.store(0, cuda::std::memory_order_release);
+}
+
+UCS_F_DEVICE void uct_rc_mlx5_gda_lock(int *lock) {
+    while (atomicCAS(lock, 0, 1) != 0)
+        ;
+#ifdef DOCA_GPUNETIO_VERBS_HAS_FENCE_ACQUIRE_RELEASE_PTX
+    asm volatile("fence.acquire.gpu;");
+#else
+    uint32_t dummy;
+    uint32_t UCS_V_UNUSED val;
+    asm volatile("ld.acquire.gpu.b32 %0, [%1];" : "=r"(val) : "l"(&dummy));
+#endif
+}
+
 UCS_F_DEVICE uint16_t uct_rc_mlx5_gda_bswap16(uint16_t x)
 {
     uint32_t ret;
@@ -107,21 +138,90 @@ UCS_F_DEVICE uint16_t uct_rc_mlx5_gda_bswap16(uint16_t x)
     return ret;
 }
 
+UCS_F_DEVICE mlx5_cqe64*
+uct_rc_mlx5_gda_get_cqe(uct_rc_gdaki_dev_ep_t *ep, uint32_t cq_ci)
+{
+    uintptr_t cqe_addr = (uintptr_t)ep->cqe_daddr;
+    uint32_t cq_mask   = (1U << ep->cq_length_log) - 1;
+    uint32_t idx       = cq_ci & cq_mask;
+    
+    return (mlx5_cqe64*)(cqe_addr + (idx << ep->cqe_size_log));
+}
+
+UCS_F_DEVICE bool
+uct_rc_mlx5_gda_cqe_is_hw_owned(uct_rc_gdaki_dev_ep_t *ep, mlx5_cqe64 *cqe,
+                                uint32_t cq_ci)
+{
+    uint8_t op_own = READ_ONCE(cqe->op_own);
+    uint8_t sw_own = !!(cq_ci & (1U << ep->cq_length_log));
+    
+    return (op_own & MLX5_CQE_OWNER_MASK) != sw_own;
+}
+
 UCS_F_DEVICE uint64_t uct_rc_mlx5_gda_parse_cqe(uct_rc_gdaki_dev_ep_t *ep,
                                                 uint16_t *wqe_cnt,
-                                                uint8_t *opcode)
+                                                uint8_t *opcode=nullptr,
+                                                mlx5_cqe64 *cqe_cache=nullptr)
 {
-    auto *cqe64        = reinterpret_cast<mlx5_cqe64*>(ep->cqe_daddr);
-    uint32_t *data_ptr = (uint32_t*)&cqe64->wqe_counter;
-    uint32_t data      = READ_ONCE(*data_ptr);
-    uint64_t rsvd_idx  = READ_ONCE(ep->sq_rsvd_index);
-
+    /* Read cached CQE (updated by ep_progress) - all data from same CQE */
+    uct_rc_mlx5_gda_lock(&ep->cq_lock);
+    
+    uint32_t data = *(uint32_t*)&ep->last_cqe.wqe_counter;
     *wqe_cnt = uct_rc_mlx5_gda_bswap16(data);
+    
     if (opcode != nullptr) {
         *opcode = data >> 28;
     }
-
+    
+    if (cqe_cache != nullptr) {
+        *cqe_cache = ep->last_cqe;
+    }
+    
+    
+    
+    uint64_t rsvd_idx = READ_ONCE(ep->sq_rsvd_index);
+    uct_rc_mlx5_gda_unlock(&ep->cq_lock);
     return rsvd_idx - ((rsvd_idx - *wqe_cnt) & 0xffff);
+}
+
+/* Thread-safe CQ progress with lock */
+template<ucs_device_level_t level>
+UCS_F_DEVICE void uct_rc_mlx5_gda_ep_progress(uct_device_ep_h tl_ep)
+{
+    auto ep = reinterpret_cast<uct_rc_gdaki_dev_ep_t*>(tl_ep);
+    
+    uct_rc_mlx5_gda_lock(&ep->cq_lock);
+    
+    uint32_t cq_ci = ep->cq_ci;
+    bool dbr_update_needed = false;
+    uint32_t iterations = 0;
+    mlx5_cqe64 *cqe;
+    mlx5_cqe64 last_cqe;
+    
+    /* Loop through CQ until we hit HW-owned CQE or reach limit */
+    while (iterations < ep->cqe_num) {
+        cqe = uct_rc_mlx5_gda_get_cqe(ep, cq_ci);
+        
+        if (uct_rc_mlx5_gda_cqe_is_hw_owned(ep, cqe, cq_ci)) {
+            break;  /* No more work - HW hasn't written here yet */
+        }
+        
+        /* SW owns it - consume it and cache entire CQE */
+        last_cqe = *cqe;
+        
+        cq_ci++;
+        dbr_update_needed = true;
+        iterations++;
+    }
+    
+    /* Update consumer index, cached CQE, and doorbell if we consumed anything */
+    if (dbr_update_needed) {
+        ep->last_cqe = last_cqe;
+        WRITE_ONCE(ep->cq_ci, cq_ci);
+        uct_rc_mlx5_gda_update_cq_dbrec(ep, cq_ci);
+    }
+    
+    uct_rc_mlx5_gda_unlock(&ep->cq_lock);
 }
 
 UCS_F_DEVICE uint64_t uct_rc_mlx5_gda_max_alloc_wqe_base(
@@ -130,7 +230,8 @@ UCS_F_DEVICE uint64_t uct_rc_mlx5_gda_max_alloc_wqe_base(
     uint16_t wqe_cnt;
     uint64_t pi;
 
-    pi = uct_rc_mlx5_gda_parse_cqe(ep, &wqe_cnt, nullptr);
+    uct_rc_mlx5_gda_ep_progress<UCS_DEVICE_LEVEL_THREAD>((uct_device_ep_h)ep);
+    pi = uct_rc_mlx5_gda_parse_cqe(ep, &wqe_cnt, nullptr, nullptr);
     return pi + ep->sq_wqe_num + 1 - count;
 }
 
@@ -266,22 +367,6 @@ UCS_F_DEVICE void uct_rc_mlx5_gda_wqe_prepare_put_with_imm(
     doca_gpu_dev_verbs_store_wqe_seg(dseg_ptr, (uint64_t*)&(dseg));
 }
 
-UCS_F_DEVICE void uct_rc_mlx5_gda_lock(int *lock) {
-    while (atomicCAS(lock, 0, 1) != 0)
-        ;
-#ifdef DOCA_GPUNETIO_VERBS_HAS_FENCE_ACQUIRE_RELEASE_PTX
-    asm volatile("fence.acquire.gpu;");
-#else
-    uint32_t dummy;
-    uint32_t UCS_V_UNUSED val;
-    asm volatile("ld.acquire.gpu.b32 %0, [%1];" : "=r"(val) : "l"(&dummy));
-#endif
-}
-
-UCS_F_DEVICE void uct_rc_mlx5_gda_unlock(int *lock) {
-    cuda::atomic_ref<int, cuda::thread_scope_device> lock_aref(*lock);
-    lock_aref.store(0, cuda::std::memory_order_release);
-}
 
 UCS_F_DEVICE void uct_rc_mlx5_gda_db(uct_rc_gdaki_dev_ep_t *ep,
                                      uint64_t wqe_base, unsigned count,
@@ -601,10 +686,6 @@ uct_rc_mlx5_gda_qedump(const char *pfx, void *buff, ssize_t len)
     }
 }
 
-template<ucs_device_level_t level>
-UCS_F_DEVICE void uct_rc_mlx5_gda_ep_progress(uct_device_ep_h tl_ep)
-{
-}
 
 template<ucs_device_level_t level>
 UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_check_completion(
@@ -614,9 +695,11 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_check_completion(
     uct_rc_gda_completion_t *comp = &tl_comp->rc_gda;
     uint16_t wqe_cnt;
     uint8_t opcode;
+    mlx5_cqe64 cqe_cached;
     uint64_t pi;
 
-    pi = uct_rc_mlx5_gda_parse_cqe(ep, &wqe_cnt, &opcode);
+    /* Cache the CQE content in case we need it for error dumping */
+    pi = uct_rc_mlx5_gda_parse_cqe(ep, &wqe_cnt, &opcode, &cqe_cached);
 
     if (pi < comp->wqe_idx) {
         return UCS_INPROGRESS;
@@ -625,8 +708,10 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_check_completion(
     if (opcode == MLX5_CQE_REQ_ERR) {
         uint16_t wqe_idx = wqe_cnt & (ep->sq_wqe_num - 1);
         auto wqe_ptr     = uct_rc_mlx5_gda_get_wqe_ptr(ep, wqe_idx);
+        
+        /* Dump the cached CQE (safe even if cq_ci has advanced) */
         uct_rc_mlx5_gda_qedump("WQE", wqe_ptr, 64);
-        uct_rc_mlx5_gda_qedump("CQE", ep->cqe_daddr, 64);
+        uct_rc_mlx5_gda_qedump("CQE", &cqe_cached, 64);
         return UCS_ERR_IO_ERROR;
     }
 
