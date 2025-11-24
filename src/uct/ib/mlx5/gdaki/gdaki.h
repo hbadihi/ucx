@@ -31,7 +31,8 @@ typedef struct uct_rc_gdaki_iface {
 
 typedef struct uct_rc_gdaki_ep {
     uct_base_ep_t                super;
-    uct_ib_mlx5_cq_t             cq;
+    uct_ib_mlx5_cq_t             sq_cq;
+    uct_ib_mlx5_cq_t             rx_cq;
     uct_ib_mlx5_txwq_t           qp;
     struct mlx5dv_devx_umem      *umem;
     CUdeviceptr                  ep_raw;

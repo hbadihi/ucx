@@ -63,16 +63,23 @@ err:
 }
 
 static void
-uct_rc_gdaki_calc_dev_ep_layout(size_t cq_umem_len, unsigned max_tx,
-                                size_t *cq_umem_offset_p,
+uct_rc_gdaki_calc_dev_ep_layout(size_t sq_cq_umem_len, unsigned max_tx,
+                                size_t rx_cq_umem_len,
+                                size_t *sq_cq_umem_offset_p,
                                 size_t *qp_umem_offset_p,
+                                size_t *rx_cq_umem_offset_p,
                                 size_t *dev_ep_size_p)
 {
-    *cq_umem_offset_p  = ucs_align_up_pow2(sizeof(uct_rc_gdaki_dev_ep_t),
-                                           ucs_get_page_size());
-    *qp_umem_offset_p  = ucs_align_up_pow2(*cq_umem_offset_p + cq_umem_len,
-                                           ucs_get_page_size());
-    *dev_ep_size_p     = *qp_umem_offset_p + max_tx * MLX5_SEND_WQE_BB;
+    size_t sq_wq_len;
+
+    *sq_cq_umem_offset_p = ucs_align_up_pow2(sizeof(uct_rc_gdaki_dev_ep_t),
+                                             ucs_get_page_size());
+    *qp_umem_offset_p    = ucs_align_up_pow2(*sq_cq_umem_offset_p + sq_cq_umem_len,
+                                             ucs_get_page_size());
+    sq_wq_len            = max_tx * MLX5_SEND_WQE_BB;
+    *rx_cq_umem_offset_p = ucs_align_up_pow2(*qp_umem_offset_p + sq_wq_len,
+                                             ucs_get_page_size());
+    *dev_ep_size_p       = *rx_cq_umem_offset_p + rx_cq_umem_len;
 }
 
 static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
@@ -82,10 +89,11 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
     uct_ib_mlx5_md_t *md = ucs_derived_of(iface->super.super.super.super.md,
                                           uct_ib_mlx5_md_t);
     uct_ib_iface_init_attr_t init_attr = {};
-    uct_ib_mlx5_cq_attr_t sq_cq_attr      = {};
+    uct_ib_mlx5_cq_attr_t sq_cq_attr   = {};
+    uct_ib_mlx5_cq_attr_t rx_cq_attr   = {};
     uct_ib_mlx5_qp_attr_t qp_attr      = {};
     ucs_status_t status;
-    size_t dev_ep_size;
+    size_t dev_ep_size, rx_cq_umem_offset;
     uct_ib_mlx5_dbrec_t dbrec;
 
     UCS_CLASS_CALL_SUPER_INIT(uct_base_ep_t, &iface->super.super.super.super);
@@ -98,29 +106,70 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
     }
 
     init_attr.cq_len[UCT_IB_DIR_TX] = 1;
+    init_attr.cq_len[UCT_IB_DIR_RX] = iface->super.super.super.config.rx_max_batch;
     uct_ib_mlx5_cq_calc_sizes(&iface->super.super.super, UCT_IB_DIR_TX,
                               &init_attr, 0, &sq_cq_attr);
+    uct_ib_mlx5_cq_calc_sizes(&iface->super.super.super, UCT_IB_DIR_RX,
+                              &init_attr, 0, &rx_cq_attr);
     uct_rc_iface_fill_attr(&iface->super.super, &qp_attr.super,
-                           iface->super.super.config.tx_qp_len, NULL);
+                           iface->super.super.config.tx_qp_len,
+                           iface->super.rx.srq.verbs.srq);
     uct_ib_mlx5_wq_calc_sizes(&qp_attr);
 
-    sq_cq_attr.flags      |= UCT_IB_MLX5_CQ_IGNORE_OVERRUN;
+    sq_cq_attr.flags |= UCT_IB_MLX5_CQ_IGNORE_OVERRUN;
 
-    qp_attr.mmio_mode     = UCT_IB_MLX5_MMIO_MODE_DB;
-    qp_attr.super.srq_num = 0;
+    qp_attr.mmio_mode = UCT_IB_MLX5_MMIO_MODE_DB;
 
     /* Disable inline scatter to TX CQE */
     qp_attr.super.max_inl_cqe[UCT_IB_DIR_TX] = 0;
 
     /*
-     * dev_ep layout:
-     * +---------------------+---------+---------+
-     * | counters, dbr       | cq buff | wq buff |
-     * +---------------------+---------+---------+
+     * dev_ep layout in GPU memory:
+     * +---------------------------+------------+------------+------------+
+     * | uct_rc_gdaki_dev_ep_t     | SQ CQ buf  | SQ WQ buf  | RX CQ buf  |
+     * +---------------------------+------------+------------+------------+
+     * 
+     * uct_rc_gdaki_dev_ep_t struct contains:
+     *   - Atomic operation metadata (atomic_va, atomic_lkey)
+     *   - Doorbell records (32 bytes total):
+     *       * sq_cq_dbrec[2]: SQ CQ doorbell record (8 bytes, 2 x uint32_t)
+     *                         [0] = consumer counter
+     *                         [1] = reserved/flags
+     *       * rx_cq_dbrec[2]: RX CQ doorbell record (8 bytes, 2 x uint32_t)
+     *                         [0] = consumer counter
+     *                         [1] = reserved/flags
+     *       * sq_dbrec[2]:    SQ doorbell record (8 bytes, 2 x uint32_t)
+     *                         [0] = producer index
+     *                         [1] = reserved/flags
+     *       * rx_dbrec[2]:    SRQ doorbell record (8 bytes, 2 x uint32_t)
+     *                         [0] = producer index
+     *                         [1] = reserved/flags
+     *   - Queue management:
+     *       * sq_rsvd_index, sq_ready_index: producer/consumer tracking
+     *       * sq_lock: synchronization for multi-thread access
+     *   - Hardware pointers:
+     *       * sq_wqe_daddr, sq_cqe_daddr: pointers to SQ WQ/CQ buffers
+     *       * sq_dbrec_p, sq_db: SQ hardware doorbell pointers
+     *       * rx_cqe_daddr: pointer to RX CQ buffer
+     *       * rx_dbrec_p, rx_db: SRQ hardware doorbell pointers (rx_db is NULL)
+     *   - Queue parameters: sq_cqe_num, rx_cqe_num, sq_wqe_num, sq_num, sq_fc_mask
+     * 
+     * All four sections (struct, SQ CQ buffer, SQ WQ buffer, RX CQ buffer) are
+     * page-aligned for hardware DMA requirements.
+     * 
+     * Architecture notes:
+     *   - SRQ (Shared Receive Queue) is at interface level with WQE buffer on CPU
+     *   - RX CQ is per-endpoint on GPU for polling receive completions
+     *   - SQ CQ is per-endpoint on GPU for polling send completions
+     *   - GPU can post receives to SRQ via rx_dbrec_p (points to CPU memory)
+     *   - SRQ doesn't use UAR doorbell, only doorbell record updates
      */
     uct_rc_gdaki_calc_dev_ep_layout(sq_cq_attr.umem_len, qp_attr.max_tx,
+                                    rx_cq_attr.umem_len,
                                     &sq_cq_attr.umem_offset,
-                                    &qp_attr.umem_offset, &dev_ep_size);
+                                    &qp_attr.umem_offset,
+                                    &rx_cq_umem_offset,
+                                    &dev_ep_size);
 
     status      = uct_rc_gdaki_alloc(dev_ep_size, ucs_get_page_size(),
                                      (void**)&self->ep_gpu, &self->ep_raw);
@@ -140,27 +189,38 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
         goto err_mem;
     }
 
-    self->cq.devx.mem.mem       = self->umem;
+    self->sq_cq.devx.mem.mem    = self->umem;
+    self->rx_cq.devx.mem.mem    = self->umem;
     self->qp.super.devx.mem.mem = self->umem;
 
     dbrec.mem_id        = self->umem->umem_id;
     dbrec.offset        = ucs_offsetof(uct_rc_gdaki_dev_ep_t, sq_cq_dbrec);
-    self->cq.devx.dbrec = &dbrec;
+    self->sq_cq.devx.dbrec = &dbrec;
     status = uct_ib_mlx5_devx_create_cq_common(&iface->super.super.super,
                                                UCT_IB_DIR_TX, &sq_cq_attr,
-                                               &self->cq, 0, 0);
+                                               &self->sq_cq, 0, 0);
     if (status != UCS_OK) {
         goto err_umem;
     }
 
-    dbrec.offset              = ucs_offsetof(uct_rc_gdaki_dev_ep_t, qp_dbrec);
+    dbrec.offset           = ucs_offsetof(uct_rc_gdaki_dev_ep_t, rx_cq_dbrec);
+    rx_cq_attr.umem_offset = rx_cq_umem_offset;
+    self->rx_cq.devx.dbrec = &dbrec;
+    status = uct_ib_mlx5_devx_create_cq_common(&iface->super.super.super,
+                                               UCT_IB_DIR_RX, &rx_cq_attr,
+                                               &self->rx_cq, 0, 0);
+    if (status != UCS_OK) {
+        goto err_sq_cq;
+    }
+
+    dbrec.offset              = ucs_offsetof(uct_rc_gdaki_dev_ep_t, sq_dbrec);
     self->qp.super.devx.dbrec = &dbrec;
     status = uct_ib_mlx5_devx_create_qp_common(&iface->super.super.super,
-                                               &self->cq, &self->cq,
+                                               &self->sq_cq, &self->rx_cq,
                                                &self->qp.super, &self->qp,
                                                &qp_attr);
     if (status != UCS_OK) {
-        goto err_cq;
+        goto err_rx_cq;
     }
 
     (void)cuMemHostRegister(self->qp.reg->addr.ptr, UCT_IB_MLX5_BF_REG_SIZE * 2,
@@ -181,8 +241,10 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
 err_dev_ep:
     (void)cuMemHostUnregister(self->qp.reg->addr.ptr);
     uct_ib_mlx5_devx_destroy_qp_common(&self->qp.super);
-err_cq:
-    uct_ib_mlx5_devx_destroy_cq_common(&self->cq);
+err_rx_cq:
+    uct_ib_mlx5_devx_destroy_cq_common(&self->rx_cq);
+err_sq_cq:
+    uct_ib_mlx5_devx_destroy_cq_common(&self->sq_cq);
 err_umem:
     mlx5dv_devx_umem_dereg(self->umem);
 err_mem:
@@ -196,7 +258,8 @@ static UCS_CLASS_CLEANUP_FUNC(uct_rc_gdaki_ep_t)
 {
     (void)cuMemHostUnregister(self->sq_db);
     uct_ib_mlx5_devx_destroy_qp_common(&self->qp.super);
-    uct_ib_mlx5_devx_destroy_cq_common(&self->cq);
+    uct_ib_mlx5_devx_destroy_cq_common(&self->rx_cq);
+    uct_ib_mlx5_devx_destroy_cq_common(&self->sq_cq);
     mlx5dv_devx_umem_dereg(self->umem);
     cuMemFree(self->ep_raw);
 }
@@ -353,8 +416,9 @@ uct_rc_gdaki_ep_get_device_ep(uct_ep_h tl_ep, uct_device_ep_h *device_ep_p)
     uct_rc_gdaki_iface_t *iface  = ucs_derived_of(ep->super.super.iface,
                                                   uct_rc_gdaki_iface_t);
     uct_rc_gdaki_dev_ep_t dev_ep = {};
-    unsigned cq_size, cqe_size, max_tx;
-    size_t cq_umem_offset, cq_umem_len, qp_umem_offset, dev_ep_size;
+    unsigned sq_cq_size, sq_cqe_size, rx_cq_size, rx_cqe_size, max_tx;
+    size_t sq_cq_umem_offset, sq_cq_umem_len, qp_umem_offset;
+    size_t rx_cq_umem_offset, rx_cq_umem_len, dev_ep_size;
     ucs_status_t status;
 
     pthread_mutex_lock(&iface->ep_init_lock);
@@ -365,15 +429,18 @@ uct_rc_gdaki_ep_get_device_ep(uct_ep_h tl_ep, uct_device_ep_h *device_ep_p)
             goto out_unlock;
         }
 
-        cq_size     = UCS_BIT(ep->cq.cq_length_log);
-        cqe_size    = UCS_BIT(ep->cq.cqe_size_log);
-        cq_umem_len = cqe_size * cq_size;
+        sq_cq_size     = UCS_BIT(ep->sq_cq.cq_length_log);
+        sq_cqe_size    = UCS_BIT(ep->sq_cq.cqe_size_log);
+        sq_cq_umem_len = sq_cqe_size * sq_cq_size;
+        rx_cq_size     = UCS_BIT(ep->rx_cq.cq_length_log);
+        rx_cqe_size    = UCS_BIT(ep->rx_cq.cqe_size_log);
+        rx_cq_umem_len = rx_cqe_size * rx_cq_size;
         /* Reconstruct original max_tx from bb_max */
-        max_tx      = ep->qp.bb_max + 2 * UCT_IB_MLX5_MAX_BB;
+        max_tx         = ep->qp.bb_max + 2 * UCT_IB_MLX5_MAX_BB;
 
-        uct_rc_gdaki_calc_dev_ep_layout(cq_umem_len, max_tx,
-                                        &cq_umem_offset,
-                                        &qp_umem_offset, &dev_ep_size);
+        uct_rc_gdaki_calc_dev_ep_layout(sq_cq_umem_len, max_tx, rx_cq_umem_len,
+                                        &sq_cq_umem_offset, &qp_umem_offset,
+                                        &rx_cq_umem_offset, &dev_ep_size);
 
         status = UCT_CUDADRV_FUNC_LOG_ERR(
                 cuMemsetD8((CUdeviceptr)ep->ep_gpu, 0, dev_ep_size));
@@ -382,8 +449,15 @@ uct_rc_gdaki_ep_get_device_ep(uct_ep_h tl_ep, uct_device_ep_h *device_ep_p)
         }
 
         status = UCT_CUDADRV_FUNC_LOG_ERR(cuMemsetD8(
-                (CUdeviceptr)UCS_PTR_BYTE_OFFSET(ep->ep_gpu, cq_umem_offset),
-                0xff, cq_umem_len));
+                (CUdeviceptr)UCS_PTR_BYTE_OFFSET(ep->ep_gpu, sq_cq_umem_offset),
+                0xff, sq_cq_umem_len));
+        if (status != UCS_OK) {
+            goto out_ctx;
+        }
+
+        status = UCT_CUDADRV_FUNC_LOG_ERR(cuMemsetD8(
+                (CUdeviceptr)UCS_PTR_BYTE_OFFSET(ep->ep_gpu, rx_cq_umem_offset),
+                0xff, rx_cq_umem_len));
         if (status != UCS_OK) {
             goto out_ctx;
         }
@@ -392,15 +466,22 @@ uct_rc_gdaki_ep_get_device_ep(uct_ep_h tl_ep, uct_device_ep_h *device_ep_p)
         dev_ep.atomic_lkey    = htonl(iface->atomic_mr->lkey);
         dev_ep.sq_num         = ep->qp.super.qp_num;
         dev_ep.sq_wqe_daddr   = UCS_PTR_BYTE_OFFSET(ep->ep_gpu, qp_umem_offset);
-        dev_ep.sq_dbrec       = &ep->ep_gpu->qp_dbrec[MLX5_SND_DBR];
+        dev_ep.sq_dbrec_p     = &ep->ep_gpu->sq_dbrec[MLX5_SND_DBR];
         dev_ep.sq_wqe_num     = max_tx;
         /* FC mask is used to determine if WQE should be posted with completion.
          * max_tx must be a power of 2. */
         dev_ep.sq_fc_mask     = (max_tx >> 1) - 1;
 
-        dev_ep.sq_cqe_daddr      = UCS_PTR_BYTE_OFFSET(ep->ep_gpu, cq_umem_offset);
-        dev_ep.sq_cqe_num        = cq_size;
+        dev_ep.sq_cqe_daddr      = UCS_PTR_BYTE_OFFSET(ep->ep_gpu, sq_cq_umem_offset);
+        dev_ep.sq_cqe_num        = sq_cq_size;
         dev_ep.sq_db          = ep->sq_db;
+
+        dev_ep.rx_cqe_daddr = UCS_PTR_BYTE_OFFSET(ep->ep_gpu, rx_cq_umem_offset);
+        dev_ep.rx_cqe_num   = rx_cq_size;
+
+        /* Set SRQ doorbell pointers (SRQ is at interface level) */
+        dev_ep.rx_dbrec_p   = (uint32_t*)iface->super.rx.srq.db;
+        dev_ep.rx_db        = NULL; /* SRQ doesn't use UAR doorbell */
 
         status = UCT_CUDADRV_FUNC_LOG_ERR(cuMemcpyHtoD(
                 (CUdeviceptr)ep->ep_gpu, &dev_ep, sizeof(dev_ep)));
@@ -442,6 +523,26 @@ uct_rc_gdaki_iface_mem_element_pack(const uct_iface_h tl_iface, uct_mem_h memh,
             cuMemcpyHtoD((CUdeviceptr)mem_elem_p, &mem_elem, sizeof(mem_elem)));
 }
 
+static ucs_status_t
+uct_rc_gdaki_init_rx(uct_rc_iface_t *rc_iface,
+                     const uct_rc_iface_common_config_t *rc_config)
+{
+    uct_rc_gdaki_iface_t *iface = ucs_derived_of(rc_iface,
+                                                 uct_rc_gdaki_iface_t);
+
+    return uct_rc_mlx5_common_iface_init_rx(&iface->super, rc_config);
+}
+
+static void uct_rc_gdaki_cleanup_rx(uct_rc_iface_t *rc_iface)
+{
+    uct_ib_mlx5_md_t *md = ucs_derived_of(rc_iface->super.super.md,
+                                          uct_ib_mlx5_md_t);
+    uct_rc_gdaki_iface_t *iface = ucs_derived_of(rc_iface,
+                                                 uct_rc_gdaki_iface_t);
+
+    uct_rc_mlx5_destroy_srq(md, &iface->super.rx.srq);
+}
+
 static UCS_CLASS_DECLARE_NEW_FUNC(uct_rc_gdaki_iface_t, uct_iface_t, uct_md_h,
                                   uct_worker_h, const uct_iface_params_t*,
                                   const uct_iface_config_t*);
@@ -465,9 +566,8 @@ static uct_rc_iface_ops_t uct_rc_gdaki_internal_ops = {
         .create_cq  = uct_rc_gdaki_create_cq,
         .destroy_cq = (uct_ib_iface_destroy_cq_func_t)ucs_empty_function_return_success,
     },
-    .init_rx    = (uct_rc_iface_init_rx_func_t)ucs_empty_function_return_success,
-    .cleanup_rx = (uct_rc_iface_cleanup_rx_func_t)
-            ucs_empty_function_return_success,
+    .init_rx    = uct_rc_gdaki_init_rx,
+    .cleanup_rx = uct_rc_gdaki_cleanup_rx,
 };
 
 static uct_iface_ops_t uct_rc_gdaki_iface_tl_ops = {
