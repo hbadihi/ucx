@@ -14,7 +14,7 @@ typedef struct {
     void                         *atomic_va;
     uint32_t                     atomic_lkey;
     uint32_t                     pad[1];
-    uint32_t                     cq_dbrec[2];
+    uint32_t                     sq_cq_dbrec[2];
     uint32_t                     qp_dbrec[2];
 
     uint64_t                     sq_rsvd_index;
@@ -24,8 +24,8 @@ typedef struct {
     uint8_t                      *sq_wqe_daddr;
     uint32_t                     *sq_dbrec;
     uint64_t                     *sq_db;
-    uint8_t                      *cqe_daddr;
-    uint32_t                     cqe_num;
+    uint8_t                      *sq_cqe_daddr;
+    uint32_t                     sq_cqe_num;
     uint16_t                     sq_wqe_num;
     uint32_t                     sq_num;
     uint16_t                     sq_fc_mask;

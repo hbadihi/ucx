@@ -111,7 +111,7 @@ UCS_F_DEVICE uint64_t uct_rc_mlx5_gda_parse_cqe(uct_rc_gdaki_dev_ep_t *ep,
                                                 uint16_t *wqe_cnt,
                                                 uint8_t *opcode)
 {
-    auto *cqe64        = reinterpret_cast<mlx5_cqe64*>(ep->cqe_daddr);
+    auto *cqe64        = reinterpret_cast<mlx5_cqe64*>(ep->sq_cqe_daddr);
     uint32_t *data_ptr = (uint32_t*)&cqe64->wqe_counter;
     uint32_t data      = READ_ONCE(*data_ptr);
     uint64_t rsvd_idx  = READ_ONCE(ep->sq_rsvd_index);
@@ -589,7 +589,7 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_check_completion(
         uint16_t wqe_idx = wqe_cnt & (ep->sq_wqe_num - 1);
         auto wqe_ptr     = uct_rc_mlx5_gda_get_wqe_ptr(ep, wqe_idx);
         uct_rc_mlx5_gda_qedump("WQE", wqe_ptr, 64);
-        uct_rc_mlx5_gda_qedump("CQE", ep->cqe_daddr, 64);
+        uct_rc_mlx5_gda_qedump("CQE", ep->sq_cqe_daddr, 64);
         return UCS_ERR_IO_ERROR;
     }
 
