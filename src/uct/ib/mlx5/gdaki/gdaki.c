@@ -82,7 +82,7 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
     uct_ib_mlx5_md_t *md = ucs_derived_of(iface->super.super.super.super.md,
                                           uct_ib_mlx5_md_t);
     uct_ib_iface_init_attr_t init_attr = {};
-    uct_ib_mlx5_cq_attr_t cq_attr      = {};
+    uct_ib_mlx5_cq_attr_t sq_cq_attr      = {};
     uct_ib_mlx5_qp_attr_t qp_attr      = {};
     ucs_status_t status;
     size_t dev_ep_size;
@@ -99,12 +99,12 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
 
     init_attr.cq_len[UCT_IB_DIR_TX] = 1;
     uct_ib_mlx5_cq_calc_sizes(&iface->super.super.super, UCT_IB_DIR_TX,
-                              &init_attr, 0, &cq_attr);
+                              &init_attr, 0, &sq_cq_attr);
     uct_rc_iface_fill_attr(&iface->super.super, &qp_attr.super,
                            iface->super.super.config.tx_qp_len, NULL);
     uct_ib_mlx5_wq_calc_sizes(&qp_attr);
 
-    cq_attr.flags      |= UCT_IB_MLX5_CQ_IGNORE_OVERRUN;
+    sq_cq_attr.flags      |= UCT_IB_MLX5_CQ_IGNORE_OVERRUN;
 
     qp_attr.mmio_mode     = UCT_IB_MLX5_MMIO_MODE_DB;
     qp_attr.super.srq_num = 0;
@@ -118,8 +118,8 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
      * | counters, dbr       | cq buff | wq buff |
      * +---------------------+---------+---------+
      */
-    uct_rc_gdaki_calc_dev_ep_layout(cq_attr.umem_len, qp_attr.max_tx,
-                                    &cq_attr.umem_offset,
+    uct_rc_gdaki_calc_dev_ep_layout(sq_cq_attr.umem_len, qp_attr.max_tx,
+                                    &sq_cq_attr.umem_offset,
                                     &qp_attr.umem_offset, &dev_ep_size);
 
     status      = uct_rc_gdaki_alloc(dev_ep_size, ucs_get_page_size(),
@@ -144,10 +144,10 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
     self->qp.super.devx.mem.mem = self->umem;
 
     dbrec.mem_id        = self->umem->umem_id;
-    dbrec.offset        = ucs_offsetof(uct_rc_gdaki_dev_ep_t, cq_dbrec);
+    dbrec.offset        = ucs_offsetof(uct_rc_gdaki_dev_ep_t, sq_cq_dbrec);
     self->cq.devx.dbrec = &dbrec;
     status = uct_ib_mlx5_devx_create_cq_common(&iface->super.super.super,
-                                               UCT_IB_DIR_TX, &cq_attr,
+                                               UCT_IB_DIR_TX, &sq_cq_attr,
                                                &self->cq, 0, 0);
     if (status != UCS_OK) {
         goto err_umem;
@@ -398,8 +398,8 @@ uct_rc_gdaki_ep_get_device_ep(uct_ep_h tl_ep, uct_device_ep_h *device_ep_p)
          * max_tx must be a power of 2. */
         dev_ep.sq_fc_mask     = (max_tx >> 1) - 1;
 
-        dev_ep.cqe_daddr      = UCS_PTR_BYTE_OFFSET(ep->ep_gpu, cq_umem_offset);
-        dev_ep.cqe_num        = cq_size;
+        dev_ep.sq_cqe_daddr      = UCS_PTR_BYTE_OFFSET(ep->ep_gpu, cq_umem_offset);
+        dev_ep.sq_cqe_num        = cq_size;
         dev_ep.sq_db          = ep->sq_db;
 
         status = UCT_CUDADRV_FUNC_LOG_ERR(cuMemcpyHtoD(
