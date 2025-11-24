@@ -885,20 +885,12 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_iface_t, uct_md_h tl_md,
     gpu_name = ucs_string_buffer_next_token(&strb, NULL, "-");
     ib_name  = ucs_string_buffer_next_token(&strb, gpu_name, "-");
 
-    init_attr.seg_size = config->super.super.seg_size;
-    init_attr.qp_type  = IBV_QPT_RC;
-    init_attr.dev_name = ib_name;
-
-    UCS_CLASS_CALL_SUPER_INIT(uct_rc_mlx5_iface_common_t,
-                              &uct_rc_gdaki_iface_tl_ops,
-                              &uct_rc_gdaki_internal_ops, tl_md, worker, params,
-                              &config->super, &config->mlx5, &init_attr);
-
     if (memcmp(gpu_name, UCT_DEVICE_CUDA_NAME, UCT_DEVICE_CUDA_NAME_LEN)) {
         ucs_error("wrong device name: %s\n", gpu_name);
-        return status;
+        return UCS_ERR_INVALID_PARAM;
     }
 
+    /* Initialize CUDA context before SUPER_INIT, since init_rx needs it */
     cuda_id = atoi(gpu_name + UCT_DEVICE_CUDA_NAME_LEN);
     status = UCT_CUDADRV_FUNC_LOG_ERR(cuDeviceGetPCIBusId(
                     pci_addr, UCS_SYS_BDF_NAME_MAX, cuda_id));
@@ -916,6 +908,15 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_iface_t, uct_md_h tl_md,
     if (status != UCS_OK) {
         return status;
     }
+
+    init_attr.seg_size = config->super.super.seg_size;
+    init_attr.qp_type  = IBV_QPT_RC;
+    init_attr.dev_name = ib_name;
+
+    UCS_CLASS_CALL_SUPER_INIT(uct_rc_mlx5_iface_common_t,
+                              &uct_rc_gdaki_iface_tl_ops,
+                              &uct_rc_gdaki_internal_ops, tl_md, worker, params,
+                              &config->super, &config->mlx5, &init_attr);
 
     status = UCT_CUDADRV_FUNC_LOG_ERR(cuCtxPushCurrent(self->cuda_ctx));
     if (status != UCS_OK) {
