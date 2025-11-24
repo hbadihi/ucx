@@ -26,6 +26,11 @@ typedef struct uct_rc_gdaki_iface {
     uint64_t                   *atomic_buff;
     CUcontext                  cuda_ctx;
     pthread_mutex_t            ep_init_lock;
+    
+    /* GPU SRQ doorbell */
+    CUdeviceptr                srq_dbrec_gpu;        /* GPU memory pointer */
+    struct mlx5dv_devx_umem    *srq_dbrec_umem;      /* DEVX UMEM registration */
+    uct_ib_mlx5_dbrec_t        *srq_dbrec_struct;    /* Metadata structure */
 } uct_rc_gdaki_iface_t;
 
 
