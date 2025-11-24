@@ -13,6 +13,7 @@
 #include <ucs/time/time.h>
 #include <ucs/datastruct/string_buffer.h>
 #include <uct/ib/mlx5/rc/rc_mlx5.h>
+#include <uct/ib/mlx5/ib_mlx5.inl>
 #include <uct/cuda/base/cuda_iface.h>
 
 #include <cuda.h>
@@ -174,9 +175,11 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
      * 
      * Architecture notes:
      *   - SRQ (Shared Receive Queue) is at interface level with WQE buffer on CPU
+     *   - SRQ doorbell record is on GPU (separate allocation at interface level)
      *   - RX CQ is per-endpoint on GPU for polling receive completions
      *   - SQ CQ is per-endpoint on GPU for polling send completions
-     *   - GPU can post receives to SRQ via rx_dbrec_p (points to CPU memory)
+     *   - CPU preposts WQEs at init, doorbell updated via cuMemcpyHtoD to GPU
+     *   - GPU can post receives to SRQ via rx_dbrec_p (direct GPU memory access)
      *   - SRQ doesn't use UAR doorbell, only doorbell record updates
      */
     uct_rc_gdaki_calc_dev_ep_layout(sq_cq_attr.umem_len, qp_attr.max_tx,
@@ -495,8 +498,8 @@ uct_rc_gdaki_ep_get_device_ep(uct_ep_h tl_ep, uct_device_ep_h *device_ep_p)
         dev_ep.rx_cqe_daddr = UCS_PTR_BYTE_OFFSET(ep->ep_gpu, rx_cq_umem_offset);
         dev_ep.rx_cqe_num   = rx_cq_size;
 
-        /* Set SRQ doorbell pointers (SRQ is at interface level) */
-        dev_ep.rx_dbrec_p   = (uint32_t*)iface->super.rx.srq.db;
+        /* Set SRQ doorbell pointers (SRQ is at interface level, doorbell on GPU) */
+        dev_ep.rx_dbrec_p   = (uint32_t*)iface->srq_dbrec_gpu; /* Points to GPU! */
         dev_ep.rx_db        = NULL; /* SRQ doesn't use UAR doorbell */
 
         status = UCT_CUDADRV_FUNC_LOG_ERR(cuMemcpyHtoD(
@@ -539,25 +542,295 @@ uct_rc_gdaki_iface_mem_element_pack(const uct_iface_h tl_iface, uct_mem_h memh,
             cuMemcpyHtoD((CUdeviceptr)mem_elem_p, &mem_elem, sizeof(mem_elem)));
 }
 
+/* Update SRQ resources and write doorbell to GPU memory via cuMemcpyHtoD */
+static UCS_F_ALWAYS_INLINE void
+uct_rc_gdaki_iface_update_srq_res(uct_rc_gdaki_iface_t *iface,
+                                  uct_ib_mlx5_srq_t *srq,
+                                  uint16_t wqe_index, uint16_t count)
+{
+    uct_rc_iface_t *rc_iface = &iface->super.super;
+    uint32_t doorbell_value;
+    ucs_status_t status;
+    
+    ucs_assert(rc_iface->rx.srq.available >= count);
+    
+    if (count == 0) {
+        return;
+    }
+    
+    srq->ready_idx              = wqe_index;
+    srq->sw_pi                 += count;
+    rc_iface->rx.srq.available -= count;
+    ucs_memory_cpu_store_fence();
+    
+    /* Write doorbell to GPU memory using cuMemcpyHtoD */
+    doorbell_value = htonl(srq->sw_pi);
+    status = UCT_CUDADRV_FUNC_LOG_ERR(cuCtxPushCurrent(iface->cuda_ctx));
+    if (status == UCS_OK) {
+        status = UCT_CUDADRV_FUNC_LOG_ERR(
+            cuMemcpyHtoD(iface->srq_dbrec_gpu, &doorbell_value, sizeof(uint32_t)));
+        (void)UCT_CUDADRV_FUNC_LOG_WARN(cuCtxPopCurrent(NULL));
+    }
+    
+    if (status != UCS_OK) {
+        ucs_error("Failed to update GPU doorbell: %s", ucs_status_string(status));
+    }
+}
+
+/* Post receives to SRQ with GPU doorbell update */
+static unsigned uct_rc_gdaki_iface_srq_post_recv(uct_rc_gdaki_iface_t *iface)
+{
+    uct_ib_mlx5_srq_t *srq             = &iface->super.rx.srq;
+    uct_rc_mlx5_iface_common_t *mlx5_iface = &iface->super;
+    uct_ib_mlx5_srq_seg_t *seg;
+    uint16_t count, wqe_index, next_index;
+    
+    ucs_assert(UCS_CIRCULAR_COMPARE16(srq->ready_idx, <=, srq->free_idx));
+    ucs_assert(mlx5_iface->super.rx.srq.available > 0);
+    
+    wqe_index = srq->ready_idx;
+    for (;;) {
+        next_index = wqe_index + 1;
+        seg = uct_ib_mlx5_srq_get_wqe(srq, next_index);
+        if (UCS_CIRCULAR_COMPARE16(next_index, >, srq->free_idx)) {
+            if (!seg->srq.free) {
+                break;
+            }
+            
+            ucs_assert(next_index == (uint16_t)(srq->free_idx + 1));
+            seg->srq.free  = 0;
+            srq->free_idx  = next_index;
+        }
+        
+        if (uct_rc_mlx5_iface_srq_set_seg(mlx5_iface, seg) != UCS_OK) {
+            break;
+        }
+        
+        wqe_index = next_index;
+    }
+    
+    count = wqe_index - srq->sw_pi;
+    uct_rc_gdaki_iface_update_srq_res(iface, srq, wqe_index, count);
+    return count;
+}
+
+/* Prepost receives at initialization with GPU doorbell update */
+static void uct_rc_gdaki_iface_prepost_recvs(uct_rc_gdaki_iface_t *iface)
+{
+    /* prepost recvs only if quota available (recvs were not preposted before) */
+    if (iface->super.super.rx.srq.quota == 0) {
+        return;
+    }
+    
+    iface->super.super.rx.srq.available = iface->super.super.rx.srq.quota;
+    iface->super.super.rx.srq.quota     = 0;
+    uct_rc_gdaki_iface_srq_post_recv(iface);
+}
+
+static ucs_status_t
+uct_rc_gdaki_iface_devx_init_rx(uct_rc_iface_t *rc_iface,
+                                const uct_rc_iface_common_config_t *config)
+{
+    uct_rc_gdaki_iface_t *iface       = ucs_derived_of(rc_iface, uct_rc_gdaki_iface_t);
+    uct_rc_mlx5_iface_common_t *mlx5_iface = &iface->super;
+    uct_ib_mlx5_md_t *md              = uct_ib_mlx5_iface_md(&mlx5_iface->super.super);
+    uct_ib_device_t *dev              = &md->super.dev;
+    char in[UCT_IB_MLX5DV_ST_SZ_BYTES(create_rmp_in)]   = {};
+    char out[UCT_IB_MLX5DV_ST_SZ_BYTES(create_rmp_out)] = {};
+    size_t dbrec_size;
+    ucs_status_t status;
+    void *rmpc, *wq;
+    int len, max, stride, wq_type;
+
+    /* Push CUDA context */
+    status = UCT_CUDADRV_FUNC_LOG_ERR(cuCtxPushCurrent(iface->cuda_ctx));
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    /* Allocate page-aligned GPU memory for doorbell record */
+    dbrec_size = ucs_align_up(8, ucs_get_page_size()); /* 2 x uint32_t */
+    status = UCT_CUDADRV_FUNC_LOG_ERR(cuMemAlloc(&iface->srq_dbrec_gpu, dbrec_size));
+    if (status != UCS_OK) {
+        goto err_ctx;
+    }
+
+    /* Initialize doorbell to zero */
+    status = UCT_CUDADRV_FUNC_LOG_ERR(cuMemsetD8(iface->srq_dbrec_gpu, 0, dbrec_size));
+    if (status != UCS_OK) {
+        goto err_free_gpu;
+    }
+
+    /* Register GPU memory with DEVX */
+    iface->srq_dbrec_umem = mlx5dv_devx_umem_reg(dev->ibv_context,
+                                                 (void*)iface->srq_dbrec_gpu,
+                                                 dbrec_size,
+                                                 IBV_ACCESS_LOCAL_WRITE);
+    if (iface->srq_dbrec_umem == NULL) {
+        uct_ib_check_memlock_limit_msg(dev->ibv_context, UCS_LOG_LEVEL_ERROR,
+                                       "mlx5dv_devx_umem_reg(gpu_dbrec ptr=%p size=%zu)",
+                                       (void*)iface->srq_dbrec_gpu, dbrec_size);
+        status = UCS_ERR_NO_MEMORY;
+        goto err_free_gpu;
+    }
+
+    /* Calculate SRQ parameters */
+    stride = uct_ib_mlx5_srq_stride(mlx5_iface->tm.mp.num_strides);
+    max    = uct_ib_mlx5_srq_max_wrs(config->super.rx.queue_len,
+                                     mlx5_iface->tm.mp.num_strides);
+    max    = ucs_roundup_pow2(max);
+    len    = max * stride;
+
+    /* Allocate CPU memory for SRQ WQE buffer */
+    status = uct_ib_mlx5_md_buf_alloc(md, len, 0, &mlx5_iface->rx.srq.buf,
+                                      &mlx5_iface->rx.srq.devx.mem, 0, "srq buf");
+    if (status != UCS_OK) {
+        goto err_dereg_umem;
+    }
+
+    /* Create doorbell record structure pointing to GPU */
+    iface->srq_dbrec_struct = ucs_calloc(1, sizeof(uct_ib_mlx5_dbrec_t),
+                                         "srq gpu dbrec");
+    if (iface->srq_dbrec_struct == NULL) {
+        status = UCS_ERR_NO_MEMORY;
+        goto err_free_wqe_buf;
+    }
+
+    iface->srq_dbrec_struct->mem_id = iface->srq_dbrec_umem->umem_id;
+    iface->srq_dbrec_struct->offset = 0; /* Doorbell at start of allocation */
+    iface->srq_dbrec_struct->md     = md;
+    
+    mlx5_iface->rx.srq.devx.dbrec = iface->srq_dbrec_struct;
+    mlx5_iface->rx.srq.db = (volatile uint32_t*)iface->srq_dbrec_gpu;
+
+    /* Build SRQ creation command */
+    UCT_IB_MLX5DV_SET(create_rmp_in, in, opcode, UCT_IB_MLX5_CMD_OP_CREATE_RMP);
+    rmpc = UCT_IB_MLX5DV_ADDR_OF(create_rmp_in, in, rmp_context);
+    wq   = UCT_IB_MLX5DV_ADDR_OF(rmpc, rmpc, wq);
+
+    UCT_IB_MLX5DV_SET(rmpc, rmpc, state, UCT_IB_MLX5_RMPC_STATE_RDY);
+
+    /* Determine WQ type */
+    if (mlx5_iface->config.srq_topo == UCT_RC_MLX5_SRQ_TOPO_CYCLIC) {
+        wq_type = UCT_RC_MLX5_MP_ENABLED(mlx5_iface) ?
+                  UCT_IB_MLX5_SRQ_TOPO_CYCLIC_MP_RQ :
+                  UCT_IB_MLX5_SRQ_TOPO_CYCLIC;
+    } else {
+        wq_type = UCT_RC_MLX5_MP_ENABLED(mlx5_iface) ?
+                  UCT_IB_MLX5_SRQ_TOPO_LIST_MP_RQ :
+                  UCT_IB_MLX5_SRQ_TOPO_LIST;
+    }
+
+    /* Set WQ parameters */
+    UCT_IB_MLX5DV_SET  (wq, wq, wq_type,       wq_type);
+    UCT_IB_MLX5DV_SET  (wq, wq, log_wq_sz,     ucs_ilog2(max));
+    UCT_IB_MLX5DV_SET  (wq, wq, log_wq_stride, ucs_ilog2(stride));
+    UCT_IB_MLX5DV_SET  (wq, wq, pd,            uct_ib_mlx5_devx_md_get_pdn(md));
+    
+    /* Point to GPU doorbell */
+    UCT_IB_MLX5DV_SET  (wq, wq, dbr_umem_id,   iface->srq_dbrec_umem->umem_id);
+    UCT_IB_MLX5DV_SET64(wq, wq, dbr_addr,      0); /* Offset 0 in the UMEM */
+    
+    /* Point to CPU WQE buffer */
+    UCT_IB_MLX5DV_SET  (wq, wq, wq_umem_id,    mlx5_iface->rx.srq.devx.mem.mem->umem_id);
+
+    if (UCT_RC_MLX5_MP_ENABLED(mlx5_iface)) {
+        int log_num_of_strides = ucs_ilog2(mlx5_iface->tm.mp.num_strides) - 9;
+        UCT_IB_MLX5DV_SET(wq, wq, log_wqe_num_of_strides,
+                          log_num_of_strides & 0xF);
+        UCT_IB_MLX5DV_SET(wq, wq, log_wqe_stride_size,
+                          (ucs_ilog2(mlx5_iface->super.super.config.seg_size) - 6));
+    }
+
+    /* Create SRQ object */
+    mlx5_iface->rx.srq.devx.obj = uct_ib_mlx5_devx_obj_create(dev->ibv_context, in,
+                                                               sizeof(in), out,
+                                                               sizeof(out), "RMP",
+                                                               UCS_LOG_LEVEL_ERROR);
+    if (mlx5_iface->rx.srq.devx.obj == NULL) {
+        status = UCS_ERR_IO_ERROR;
+        goto err_free_dbrec_struct;
+    }
+
+    mlx5_iface->rx.srq.srq_num = UCT_IB_MLX5DV_GET(create_rmp_out, out, rmpn);
+    mlx5_iface->rx.srq.type = UCT_IB_MLX5_OBJ_TYPE_DEVX;
+    
+    /* Initialize SRQ buffer metadata */
+    uct_ib_mlx5_srq_buff_init(&mlx5_iface->rx.srq, 0, max - 1,
+                              mlx5_iface->super.super.config.seg_size,
+                              mlx5_iface->tm.mp.num_strides);
+    mlx5_iface->super.rx.srq.quota = max - 1;
+    
+    /* Prepost receives: CPU prepares WQEs, doorbell updated to GPU via cuMemcpyHtoD */
+    uct_rc_gdaki_iface_prepost_recvs(iface);
+
+    (void)UCT_CUDADRV_FUNC_LOG_WARN(cuCtxPopCurrent(NULL));
+    return UCS_OK;
+
+err_free_dbrec_struct:
+    ucs_free(iface->srq_dbrec_struct);
+err_free_wqe_buf:
+    uct_ib_mlx5_md_buf_free(md, mlx5_iface->rx.srq.buf, &mlx5_iface->rx.srq.devx.mem);
+err_dereg_umem:
+    mlx5dv_devx_umem_dereg(iface->srq_dbrec_umem);
+err_free_gpu:
+    cuMemFree(iface->srq_dbrec_gpu);
+err_ctx:
+    (void)UCT_CUDADRV_FUNC_LOG_WARN(cuCtxPopCurrent(NULL));
+    return status;
+}
+
+static void uct_rc_gdaki_iface_devx_cleanup_rx(uct_rc_iface_t *rc_iface)
+{
+    uct_rc_gdaki_iface_t *iface = ucs_derived_of(rc_iface, uct_rc_gdaki_iface_t);
+    uct_ib_mlx5_md_t *md = uct_ib_mlx5_iface_md(&iface->super.super.super);
+    CUresult result;
+
+    /* Destroy SRQ object */
+    uct_ib_mlx5_devx_obj_destroy(iface->super.rx.srq.devx.obj, "RMP");
+
+    /* Free CPU WQE buffer */
+    uct_ib_mlx5_md_buf_free(md, iface->super.rx.srq.buf, &iface->super.rx.srq.devx.mem);
+
+    /* Deregister GPU UMEM */
+    mlx5dv_devx_umem_dereg(iface->srq_dbrec_umem);
+
+    /* Free GPU memory */
+    result = cuCtxPushCurrent(iface->cuda_ctx);
+    if (ucs_likely(result == CUDA_SUCCESS)) {
+        result = cuMemFree(iface->srq_dbrec_gpu);
+        if (ucs_unlikely((result != CUDA_SUCCESS) &&
+                         (result != CUDA_ERROR_CONTEXT_IS_DESTROYED))) {
+            UCT_CUDADRV_LOG(cuMemFree(iface->srq_dbrec_gpu), UCS_LOG_LEVEL_WARN,
+                            result);
+        }
+        (void)UCT_CUDADRV_FUNC_LOG_WARN(cuCtxPopCurrent(NULL));
+    } else if (result != CUDA_ERROR_CONTEXT_IS_DESTROYED) {
+        UCT_CUDADRV_LOG(cuCtxPushCurrent(iface->cuda_ctx), UCS_LOG_LEVEL_WARN,
+                        result);
+    }
+
+    /* Free metadata structure */
+    ucs_free(iface->srq_dbrec_struct);
+}
+
 static ucs_status_t
 uct_rc_gdaki_init_rx(uct_rc_iface_t *rc_iface,
                      const uct_rc_iface_common_config_t *rc_config)
 {
-    uct_rc_gdaki_iface_t *iface = ucs_derived_of(rc_iface,
-                                                 uct_rc_gdaki_iface_t);
-
-    return uct_rc_mlx5_common_iface_init_rx(&iface->super, rc_config);
+    return uct_rc_gdaki_iface_devx_init_rx(rc_iface, rc_config);
 }
 
 static void uct_rc_gdaki_cleanup_rx(uct_rc_iface_t *rc_iface)
 {
-    uct_ib_mlx5_md_t *md = ucs_derived_of(rc_iface->super.super.md,
-                                          uct_ib_mlx5_md_t);
-    uct_rc_gdaki_iface_t *iface = ucs_derived_of(rc_iface,
-                                                 uct_rc_gdaki_iface_t);
-
-    uct_rc_mlx5_destroy_srq(md, &iface->super.rx.srq);
+    uct_rc_gdaki_iface_devx_cleanup_rx(rc_iface);
 }
+
+static UCS_CLASS_DECLARE_NEW_FUNC(uct_rc_gdaki_iface_t, uct_iface_t, uct_md_h,
+                                  uct_worker_h, const uct_iface_params_t*,
+                                  const uct_iface_config_t*);
+
+static UCS_CLASS_DECLARE_DELETE_FUNC(uct_rc_gdaki_iface_t, uct_iface_t);
 
 static UCS_CLASS_DECLARE_NEW_FUNC(uct_rc_gdaki_iface_t, uct_iface_t, uct_md_h,
                                   uct_worker_h, const uct_iface_params_t*,
@@ -639,20 +912,12 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_iface_t, uct_md_h tl_md,
     gpu_name = ucs_string_buffer_next_token(&strb, NULL, "-");
     ib_name  = ucs_string_buffer_next_token(&strb, gpu_name, "-");
 
-    init_attr.seg_size = config->super.super.seg_size;
-    init_attr.qp_type  = IBV_QPT_RC;
-    init_attr.dev_name = ib_name;
-
-    UCS_CLASS_CALL_SUPER_INIT(uct_rc_mlx5_iface_common_t,
-                              &uct_rc_gdaki_iface_tl_ops,
-                              &uct_rc_gdaki_internal_ops, tl_md, worker, params,
-                              &config->super, &config->mlx5, &init_attr);
-
     if (memcmp(gpu_name, UCT_DEVICE_CUDA_NAME, UCT_DEVICE_CUDA_NAME_LEN)) {
         ucs_error("wrong device name: %s\n", gpu_name);
-        return status;
+        return UCS_ERR_INVALID_PARAM;
     }
 
+    /* Initialize CUDA context before SUPER_INIT, since init_rx needs it */
     cuda_id = atoi(gpu_name + UCT_DEVICE_CUDA_NAME_LEN);
     status = UCT_CUDADRV_FUNC_LOG_ERR(cuDeviceGetPCIBusId(
                     pci_addr, UCS_SYS_BDF_NAME_MAX, cuda_id));
@@ -670,6 +935,15 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_iface_t, uct_md_h tl_md,
     if (status != UCS_OK) {
         return status;
     }
+
+    init_attr.seg_size = config->super.super.seg_size;
+    init_attr.qp_type  = IBV_QPT_RC;
+    init_attr.dev_name = ib_name;
+
+    UCS_CLASS_CALL_SUPER_INIT(uct_rc_mlx5_iface_common_t,
+                              &uct_rc_gdaki_iface_tl_ops,
+                              &uct_rc_gdaki_internal_ops, tl_md, worker, params,
+                              &config->super, &config->mlx5, &init_attr);
 
     status = UCT_CUDADRV_FUNC_LOG_ERR(cuCtxPushCurrent(self->cuda_ctx));
     if (status != UCS_OK) {
