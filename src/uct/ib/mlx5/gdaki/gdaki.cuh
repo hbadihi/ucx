@@ -45,7 +45,7 @@ UCS_F_DEVICE void
 uct_rc_mlx5_gda_update_dbr(uct_rc_gdaki_dev_ep_t *ep, uint32_t prod_index)
 {
     __be32 dbrec_val  = doca_gpu_dev_verbs_prepare_dbr(prod_index);
-    __be32 *dbrec_ptr = (__be32*)__ldg((uintptr_t*)&ep->sq_dbrec);
+    __be32 *dbrec_ptr = (__be32*)__ldg((uintptr_t*)&ep->sq_dbrec_p);
 
     cuda::atomic_ref<__be32, cuda::thread_scope_system> dbrec_ptr_aref(
             *dbrec_ptr);

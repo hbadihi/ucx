@@ -15,17 +15,23 @@ typedef struct {
     uint32_t                     atomic_lkey;
     uint32_t                     pad[1];
     uint32_t                     sq_cq_dbrec[2];
-    uint32_t                     qp_dbrec[2];
+    uint32_t                     rx_cq_dbrec[2];
+    uint32_t                     sq_dbrec[2];
+    uint32_t                     rx_dbrec[2];
 
     uint64_t                     sq_rsvd_index;
     uint64_t                     sq_ready_index;
     int                          sq_lock;
 
     uint8_t                      *sq_wqe_daddr;
-    uint32_t                     *sq_dbrec;
+    uint32_t                     *sq_dbrec_p;
     uint64_t                     *sq_db;
     uint8_t                      *sq_cqe_daddr;
     uint32_t                     sq_cqe_num;
+    uint8_t                      *rx_cqe_daddr;
+    uint32_t                     rx_cqe_num;
+    uint32_t                     *rx_dbrec_p;
+    uint64_t                     *rx_db;
     uint16_t                     sq_wqe_num;
     uint32_t                     sq_num;
     uint16_t                     sq_fc_mask;
