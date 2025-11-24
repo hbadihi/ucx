@@ -764,4 +764,7 @@ uct_rc_mlx5_common_iface_init_rx(uct_rc_mlx5_iface_common_t *iface,
 
 void uct_rc_mlx5_destroy_srq(uct_ib_mlx5_md_t *md, uct_ib_mlx5_srq_t *srq);
 
+ucs_status_t
+uct_rc_mlx5_iface_srq_set_seg(uct_rc_mlx5_iface_common_t *iface,
+                              uct_ib_mlx5_srq_seg_t *seg);
 #endif

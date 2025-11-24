@@ -91,8 +91,7 @@ ucs_config_field_t uct_rc_mlx5_common_config_table[] = {
   {NULL}
 };
 
-
-static UCS_F_ALWAYS_INLINE ucs_status_t
+UCS_F_ALWAYS_INLINE ucs_status_t
 uct_rc_mlx5_iface_srq_set_seg(uct_rc_mlx5_iface_common_t *iface,
                               uct_ib_mlx5_srq_seg_t *seg)
 {
