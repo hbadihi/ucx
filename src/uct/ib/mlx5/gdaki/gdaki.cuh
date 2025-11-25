@@ -676,7 +676,7 @@ UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep, uint32_
         /* Make sure we don't read a too advanced CQE */
         if (cqe_ci < READ_ONCE(ep->rx_cq_ci)) {
             atomicAnd(imm_ptr, ~be_mask);
-            return;
+            return 0;
         }
 
         /* Process Signal work */
@@ -715,7 +715,10 @@ UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep, uint32_
         // 6. Advance CQ consumer index
         __nv_atomic_add(&ep->rx_cq_ci, 1, __NV_ATOMIC_RELEASE, __NV_THREAD_SCOPE_DEVICE);
 
+        return 1;
     }
+    
+    return 0;
 }
 
 #endif
