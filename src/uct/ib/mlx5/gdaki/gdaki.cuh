@@ -651,7 +651,7 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_put_with_imm(
 }
 
 template<ucs_device_level_t level>
-UCS_F_DEVICE void uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep)
+UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep)
 {
     // 1. Calculate CQE pointer
     uint8_t *cqe_base = (uint8_t *)__ldg((uintptr_t *)&ep->rx_cqe_daddr);
@@ -676,12 +676,13 @@ UCS_F_DEVICE void uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep)
         /* Make sure we don't read a too advanced CQE */
         if (cqe_ci < READ_ONCE(ep->rx_cq_ci)) {
             atomicAnd(imm_ptr, ~be_mask);
-            return;
+            return 0;
         }
 
-        /* Process Signal work */
-        /* Advance Signal */
-        printf("Immediate is : %#x\n", doca_gpu_dev_verbs_bswap32(old_raw_val));
+    /* Process Signal work */
+    /* Advance Signal */
+    printf("[GPU DEBUG] poll_recv_cq: Received immediate data: %#x (LE)\n", 
+           doca_gpu_dev_verbs_bswap32(old_raw_val));
     
         // 5. Update Doorbell Record for the RX CQ
         uint32_t new_cqe_ci = cqe_ci + 1;
@@ -714,7 +715,10 @@ UCS_F_DEVICE void uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep)
         // 6. Advance CQ consumer index
         __nv_atomic_add(&ep->rx_cq_ci, 1, __NV_ATOMIC_RELEASE, __NV_THREAD_SCOPE_DEVICE);
 
+        return 1;
     }
+    
+    return 0;
 }
 
 #endif
