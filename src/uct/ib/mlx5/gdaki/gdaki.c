@@ -195,6 +195,20 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
         goto err_ctx;
     }
 
+    status = UCT_CUDADRV_FUNC_LOG_ERR(cuMemAlloc(&self->signals,
+                                                 UCT_RC_GDAKI_SIGNALS_NUM *
+                                                 sizeof(uint32_t)));
+    if (status != UCS_OK) {
+        goto err_mem;
+    }
+
+    status = UCT_CUDADRV_FUNC_LOG_ERR(cuMemsetD8(self->signals, 0,
+                                                 UCT_RC_GDAKI_SIGNALS_NUM *
+                                                 sizeof(uint32_t)));
+    if (status != UCS_OK) {
+        goto err_signals;
+    }
+
     /* TODO add dmabuf_fd support */
     self->umem = mlx5dv_devx_umem_reg(md->super.dev.ibv_context, self->ep_gpu,
                                       dev_ep_size, IBV_ACCESS_LOCAL_WRITE);
@@ -204,7 +218,7 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
                                        "mlx5dv_devx_umem_reg(ptr=%p size=%zu)",
                                        self->ep_gpu, dev_ep_size);
         status = UCS_ERR_NO_MEMORY;
-        goto err_mem;
+        goto err_signals;
     }
 
     self->sq_cq.devx.mem.mem    = self->umem;
@@ -266,6 +280,8 @@ err_sq_cq:
     uct_ib_mlx5_devx_destroy_cq_common(&self->sq_cq);
 err_umem:
     mlx5dv_devx_umem_dereg(self->umem);
+err_signals:
+    cuMemFree(self->signals);
 err_mem:
     cuMemFree(self->ep_raw);
 err_ctx:
@@ -280,6 +296,7 @@ static UCS_CLASS_CLEANUP_FUNC(uct_rc_gdaki_ep_t)
     uct_ib_mlx5_devx_destroy_cq_common(&self->rx_cq);
     uct_ib_mlx5_devx_destroy_cq_common(&self->sq_cq);
     mlx5dv_devx_umem_dereg(self->umem);
+    cuMemFree(self->signals);
     cuMemFree(self->ep_raw);
 }
 
@@ -481,6 +498,12 @@ uct_rc_gdaki_ep_get_device_ep(uct_ep_h tl_ep, uct_device_ep_h *device_ep_p)
             goto out_ctx;
         }
 
+        status = UCT_CUDADRV_FUNC_LOG_ERR(cuMemsetD32(
+            (CUdeviceptr)ep->signals,
+            0, UCT_RC_GDAKI_SIGNALS_NUM));
+        if (status != UCS_OK) {
+            goto out_ctx;
+        }
         dev_ep.atomic_va      = iface->atomic_buff;
         dev_ep.atomic_lkey    = htonl(iface->atomic_mr->lkey);
         dev_ep.sq_num         = ep->qp.super.qp_num;
@@ -497,10 +520,12 @@ uct_rc_gdaki_ep_get_device_ep(uct_ep_h tl_ep, uct_device_ep_h *device_ep_p)
 
         dev_ep.rx_cqe_daddr = UCS_PTR_BYTE_OFFSET(ep->ep_gpu, rx_cq_umem_offset);
         dev_ep.rx_cqe_num   = rx_cq_size;
+        dev_ep.signals      = (uint32_t*)ep->signals;
 
         /* Set SRQ doorbell pointers (SRQ is at interface level, doorbell on GPU) */
         dev_ep.rx_dbrec_p   = (uint32_t*)iface->srq_dbrec_gpu; /* Points to GPU! */
         dev_ep.rx_db        = NULL; /* SRQ doesn't use UAR doorbell */
+        dev_ep.rx_wq_pi     = iface->super.rx.srq.sw_pi;
 
         status = UCT_CUDADRV_FUNC_LOG_ERR(cuMemcpyHtoD(
                 (CUdeviceptr)ep->ep_gpu, &dev_ep, sizeof(dev_ep)));

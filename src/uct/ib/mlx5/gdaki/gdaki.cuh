@@ -650,6 +650,86 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_put_with_imm(
     
 }
 
+template<ucs_device_level_t level>
+UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep)
+{
+    // 1. Calculate CQE pointer
+    uint8_t *cqe_base = (uint8_t *)__ldg((uintptr_t *)&ep->rx_cqe_daddr);
+    const uint32_t cqe_num = __ldg(&ep->rx_cqe_num);
+    uint32_t cqe_ci = ep->rx_cq_ci;
+    uint32_t idx = cqe_ci & (cqe_num - 1);
+    struct mlx5_cqe64 *cqe = (struct mlx5_cqe64 *)(cqe_base + (idx * sizeof(struct mlx5_cqe64)));
 
+    uint32_t *imm_ptr = (uint32_t *)&cqe->imm_inval_pkey;
+
+    // 2. Prepare mask for Logical LSB (bit 0) in Big Endian memory
+    // 0x1 (LE) -> 0x01000000 (BE)
+    uint32_t be_mask = doca_gpu_dev_verbs_bswap32(1);
+
+    // 3. Atomically OR the bit. Returns OLD value.
+    uint32_t old_raw_val = __nv_atomic_fetch_or(imm_ptr, be_mask, __NV_ATOMIC_ACQUIRE, __NV_THREAD_SCOPE_DEVICE);
+
+    // 4. Check if we won the race
+    // If bit was 0 (unset) in old value, we successfully transitioned it to 1.
+    if ((old_raw_val & be_mask) == 0) {
+        // We won!
+        /* Make sure we don't read a too advanced CQE */
+        if (cqe_ci < READ_ONCE(ep->rx_cq_ci)) {
+            atomicAnd(imm_ptr, ~be_mask);
+            return 0;
+        }
+
+        /* Process Signal work
+         * Layout (MSB -> LSB):
+         * | Signal ID (10b) | Signal Value (20b) | Signal OP (1b) | Processed (1b) |
+         */
+        uint32_t received_imm, signal_op, signal_val, signal_id;
+        received_imm = doca_gpu_dev_verbs_bswap32(old_raw_val); 
+        signal_op  = (received_imm >> 1)  & 0x1;
+        signal_val = (received_imm >> 2)  & 0xFFFFF;
+        signal_id  = (received_imm >> 22) & 0x3FF;
+        uint32_t *signal_ptr = (uint32_t *)&ep->signals[signal_id];
+        
+        if (signal_op == UCT_RC_GDAKI_SIGNAL_OP_ADD) {
+            atomicAdd(signal_ptr, signal_val);
+        } else {
+            *signal_ptr = signal_val;
+        }
+        // 5. Update Doorbell Record for the RX CQ
+        uint32_t new_cqe_ci = cqe_ci + 1;
+
+        // Doorbell Record Update (Store Release)
+        __nv_atomic_store_n(
+            &ep->rx_cq_dbrec[0],                      // ptr
+            doca_gpu_dev_verbs_bswap32(new_cqe_ci),   // val
+            __NV_ATOMIC_RELEASE,                      // order
+            __NV_THREAD_SCOPE_SYSTEM                  // scope (Doorbell goes to System!)
+        );
+        
+        /* SRQ DBR UPDATE for WQE */
+        // To replenish the SRQ (allow NIC to reuse the WQE we just consumed),
+
+        // We maintain the PI counter locally to avoid reading the DBR from host memory.
+        uint32_t old_pi = atomicAdd(&ep->rx_wq_pi, 1);
+        
+        // Doorbell Record Update (Store Release)
+        // Note: This is a blind write, relying on the local counter for serialization.
+        // In high contention, writes to the DBR might be out of order (e.g. 11 then 10),
+        // but since we only increment, the HW should eventually see the latest value.
+        __nv_atomic_store_n(
+            (uint32_t*)ep->rx_dbrec_p,                      // ptr
+            doca_gpu_dev_verbs_bswap32(old_pi + 1),         // val
+            __NV_ATOMIC_RELEASE,                            // order
+            __NV_THREAD_SCOPE_SYSTEM                        // scope
+        );
+
+        // 6. Advance CQ consumer index
+        __nv_atomic_add(&ep->rx_cq_ci, 1, __NV_ATOMIC_RELEASE, __NV_THREAD_SCOPE_DEVICE);
+
+        return 1;
+    }
+    
+    return 0;
+}
 
 #endif

@@ -30,12 +30,23 @@ typedef struct {
     uint32_t                     sq_cqe_num;
     uint8_t                      *rx_cqe_daddr;
     uint32_t                     rx_cqe_num;
+    uint32_t                     rx_cq_ci;
+    uint32_t                     rx_wq_pi;
     uint32_t                     *rx_dbrec_p;
     uint64_t                     *rx_db;
     uint16_t                     sq_wqe_num;
     uint32_t                     sq_num;
     uint16_t                     sq_fc_mask;
+    uint32_t                     *signals;
 } uct_rc_gdaki_dev_ep_t;
+
+#define UCT_RC_GDAKI_SIGNALS_NUM 1024
+
+
+typedef enum {
+    UCT_RC_GDAKI_SIGNAL_OP_ADD = 0,
+    UCT_RC_GDAKI_SIGNAL_OP_SET = 1
+} uct_rc_gdaki_signal_op_t;
 
 
 typedef struct uct_rc_gdaki_device_mem_element {
