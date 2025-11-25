@@ -30,6 +30,8 @@ typedef struct {
     uint32_t                     sq_cqe_num;
     uint8_t                      *rx_cqe_daddr;
     uint32_t                     rx_cqe_num;
+    uint32_t                     rx_cq_ci;
+    uint32_t                     rx_wq_pi;
     uint32_t                     *rx_dbrec_p;
     uint64_t                     *rx_db;
     uint16_t                     sq_wqe_num;
