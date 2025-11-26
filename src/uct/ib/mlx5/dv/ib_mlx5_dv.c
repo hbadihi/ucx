@@ -182,8 +182,16 @@ ucs_status_t uct_ib_mlx5_devx_create_qp_common(uct_ib_iface_t *iface,
     ucs_assert((attr->super.srq == NULL) || (attr->super.srq_num != 0));
     UCT_IB_MLX5DV_SET(qpc, qpc, rq_type, attr->super.srq_num ? 1 /* SRQ */ :
                                                                3 /* no RQ */);
+    if (attr->super.srq_num != 0) {
+        ucs_info("[CPU DEBUG] In QP creation, setting SRQ number(rmpn): %d", attr->super.srq_num);
+    }
+    else {
+        ucs_info("[CPU DEBUG] In QP creation, no SRQ number to set");
+    }
     UCT_IB_MLX5DV_SET(qpc, qpc, srqn_rmpn_xrqn, attr->super.srq_num);
+    ucs_info("[CPU DEBUG] In QP creation, set send CQ number: %d", send_cq->cq_num);
     UCT_IB_MLX5DV_SET(qpc, qpc, cqn_snd, send_cq->cq_num);
+    ucs_info("[CPU DEBUG] In QP creation, set receive CQ number: %d", recv_cq->cq_num);
     UCT_IB_MLX5DV_SET(qpc, qpc, cqn_rcv, recv_cq->cq_num);
     /* cppcheck-suppress internalAstError */
     UCT_IB_MLX5DV_SET(qpc, qpc, log_sq_size, ucs_ilog2_or0(attr->max_tx));

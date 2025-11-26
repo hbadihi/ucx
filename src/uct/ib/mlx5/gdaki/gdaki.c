@@ -94,7 +94,7 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
     uct_ib_mlx5_cq_attr_t rx_cq_attr   = {};
     uct_ib_mlx5_qp_attr_t qp_attr      = {};
     ucs_status_t status;
-    size_t dev_ep_size, rx_cq_umem_offset;
+    size_t dev_ep_size;
     uct_ib_mlx5_dbrec_t dbrec;
 
     UCS_CLASS_CALL_SUPER_INIT(uct_base_ep_t, &iface->super.super.super.super);
@@ -105,6 +105,7 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
     if (status != UCS_OK) {
         return status;
     }
+    ucs_debug("in EP init iface srq num: %d", iface->super.rx.srq.srq_num);
 
     init_attr.cq_len[UCT_IB_DIR_TX] = 1;
     init_attr.cq_len[UCT_IB_DIR_RX] = iface->super.super.super.config.rx_max_batch;
@@ -171,11 +172,13 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
                                     rx_cq_attr.umem_len,
                                     &sq_cq_attr.umem_offset,
                                     &qp_attr.umem_offset,
-                                    &rx_cq_umem_offset,
+                                    &rx_cq_attr.umem_offset,
                                     &dev_ep_size);
 
     status      = uct_rc_gdaki_alloc(dev_ep_size, ucs_get_page_size(),
                                      (void**)&self->ep_gpu, &self->ep_raw);
+    ucs_info("[CPU DEBUG] allocated dev_ep_size: %zu", dev_ep_size);
+    ucs_info("[CPU DEBUG] ep_gpu pointer: %p", self->ep_gpu);
     if (status != UCS_OK) {
         goto err_ctx;
     }
@@ -202,16 +205,17 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
     status = uct_ib_mlx5_devx_create_cq_common(&iface->super.super.super,
                                                UCT_IB_DIR_TX, &sq_cq_attr,
                                                &self->sq_cq, 0, 0);
+    ucs_info("[CPU DEBUG] Created send cq number: %d", self->sq_cq.cq_num);
     if (status != UCS_OK) {
         goto err_umem;
     }
 
     dbrec.offset           = ucs_offsetof(uct_rc_gdaki_dev_ep_t, rx_cq_dbrec);
-    rx_cq_attr.umem_offset = rx_cq_umem_offset;
     self->rx_cq.devx.dbrec = &dbrec;
     status = uct_ib_mlx5_devx_create_cq_common(&iface->super.super.super,
                                                UCT_IB_DIR_RX, &rx_cq_attr,
                                                &self->rx_cq, 0, 0);
+    ucs_info("[CPU DEBUG] Created receive cq number: %d", self->rx_cq.cq_num);
     if (status != UCS_OK) {
         goto err_sq_cq;
     }
@@ -222,6 +226,7 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
                                                &self->sq_cq, &self->rx_cq,
                                                &self->qp.super, &self->qp,
                                                &qp_attr);
+    ucs_info("[CPU DEBUG] Created QP with QP number: %d", self->qp.super.qp_num);
     if (status != UCS_OK) {
         goto err_rx_cq;
     }
@@ -314,7 +319,7 @@ uct_rc_gdaki_ep_connect_to_ep_v2(uct_ep_h ep,
 
     ucs_assert(path_mtu != UCT_IB_ADDRESS_INVALID_PATH_MTU);
     dest_qp_num = uct_ib_unpack_uint24(rc_addr->qp_num);
-
+    ucs_info("[CPU DEBUG] Connecting Local QP number: %d to remote QP number: %d", gdaki_ep->qp.super.qp_num, dest_qp_num);
     return uct_rc_mlx5_iface_common_devx_connect_qp(
             &iface->super, &gdaki_ep->qp.super, dest_qp_num, &ah_attr, path_mtu,
             path_index, iface->super.super.config.max_rd_atomic);
@@ -560,6 +565,8 @@ uct_rc_gdaki_iface_update_srq_res(uct_rc_gdaki_iface_t *iface,
     if (status != UCS_OK) {
         ucs_error("Failed to update GPU doorbell: %s", ucs_status_string(status));
     }
+    ucs_info("[CPU DEBUG] updated SRQ doorbell to GPU memory: %p, value: %d", 
+             (void*)(uintptr_t)iface->srq_dbrec_gpu, doorbell_value);
 }
 
 /* Post receives to SRQ with GPU doorbell update */
@@ -593,8 +600,8 @@ static unsigned uct_rc_gdaki_iface_srq_post_recv(uct_rc_gdaki_iface_t *iface)
         
         wqe_index = next_index;
     }
-    
     count = wqe_index - srq->sw_pi;
+    ucs_info("[CPU DEBUG] posted on SRQ num: %d over buffer: %p, recv wqes count: %d", srq->srq_num, srq->buf, count);
     uct_rc_gdaki_iface_update_srq_res(iface, srq, wqe_index, count);
     return count;
 }
@@ -738,6 +745,10 @@ uct_rc_gdaki_iface_devx_init_rx(uct_rc_iface_t *rc_iface,
     }
 
     mlx5_iface->rx.srq.srq_num = UCT_IB_MLX5DV_GET(create_rmp_out, out, rmpn);
+    ucs_info("[CPU DEBUG] Initialized SRQ number(rmpn): %d", mlx5_iface->rx.srq.srq_num);
+    ucs_info("[CPU DEBUG] SRQ doorbell record pointer on GPU memory: %p", 
+             (void*)(uintptr_t)iface->srq_dbrec_gpu);
+    ucs_info("[CPU DEBUG] SRQ data buffer pointer on CPU memory: %p", mlx5_iface->rx.srq.buf);
     mlx5_iface->rx.srq.type = UCT_IB_MLX5_OBJ_TYPE_DEVX;
     
     /* Initialize SRQ buffer metadata */

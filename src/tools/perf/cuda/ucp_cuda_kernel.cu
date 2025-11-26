@@ -305,10 +305,11 @@ ucp_perf_cuda_send_sync(ucp_perf_cuda_params &params, ucx_perf_counter_t idx,
         return UCS_OK;
     }
 
+    printf("ucp_perf_cuda_send_sync Waiting for completion of request\n");
     do {
         status = ucp_device_progress_req<level>(req);
     } while (status == UCS_INPROGRESS);
-
+    printf("ucp_perf_cuda_send_sync Request completed with status %d\n", status);
     return status;
 }
 
@@ -457,12 +458,22 @@ ucp_perf_cuda_put_with_imm_latency_kernel(ucx_perf_cuda_context &ctx,
             printf("Sender sent PUT with immediate ended with success\n");
             // Poll CQ for receiver's response
             while (!uct_rc_mlx5_gda_poll_recv_cq<level>(ep)) {
-                // Keep polling
+                // Print CQ info and sleep for 5 seconds (split into multiple calls due to 32-bit limit)
+                uct_rc_mlx5_gda_print_sq_cq_info<level>(ep);
+                for (int i = 0 ; i < 5000; i++)
+                {
+                    __nanosleep(1000000000U);  // 1 second
+                }
             }
         } else {
             // Receiver: Poll CQ for incoming PUT with immediate
             while (!uct_rc_mlx5_gda_poll_recv_cq<level>(ep)) {
-                // Keep polling
+                // Print CQ info and sleep for 5 seconds (split into multiple calls due to 32-bit limit)
+                uct_rc_mlx5_gda_print_rx_cq_info<level>(ep);
+                for (int i = 0 ; i < 5000; i++)
+                {
+                            __nanosleep(1000000000U);  // 1 second
+                }
             }
             // Send response back
             status = ucp_perf_cuda_send_sync<level, cmd>(params, idx, req);

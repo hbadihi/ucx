@@ -345,6 +345,37 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_single(
         }
 
         if (is_put_with_imm) {
+            printf("[GPU DEBUG] === RDMA WRITE WITH IMMEDIATE OPERATION ===\n");
+            printf("[GPU DEBUG] QP Info:\n");
+            printf("[GPU DEBUG]   local_qp_num:     0x%x\n", ep->sq_num);
+            printf("[GPU DEBUG]   remote_qp:        (routing via Address Handle)\n");
+            printf("[GPU DEBUG]   sq_wqe_num:       %u (total WQEs)\n", ep->sq_wqe_num);
+            printf("[GPU DEBUG] WQE Info:\n");
+            printf("[GPU DEBUG]   wqe_base:         %lu\n", (unsigned long)wqe_base);
+            printf("[GPU DEBUG]   wqe_idx:          %u\n", wqe_idx);
+            printf("[GPU DEBUG]   wqe_ptr:          %p (hardware descriptor address)\n", uct_rc_mlx5_gda_get_wqe_ptr(ep, wqe_idx));
+            printf("[GPU DEBUG]   sq_wqe_daddr:     %p (send queue base)\n", ep->sq_wqe_daddr);
+            printf("[GPU DEBUG]   cflag:            0x%x %s\n", cflag, 
+                   (cflag & DOCA_GPUNETIO_MLX5_WQE_CTRL_CQ_UPDATE) ? "(CQ_UPDATE)" : "");
+            printf("[GPU DEBUG]   completion:       %p\n", comp);
+            if (comp != nullptr) {
+                printf("[GPU DEBUG]   comp->wqe_idx:    %lu\n", (unsigned long)comp->wqe_idx);
+            }
+            printf("[GPU DEBUG] Memory Info:\n");
+            printf("[GPU DEBUG]   local_addr:       %p\n", address);
+            printf("[GPU DEBUG]   local_addr_u64:   0x%lx\n", reinterpret_cast<uint64_t>(address));
+            printf("[GPU DEBUG]   lkey:             0x%x (big-endian)\n", lkey);
+            printf("[GPU DEBUG]   remote_addr:      0x%lx\n", remote_address);
+            printf("[GPU DEBUG]   rkey:             0x%x (big-endian)\n", rkey);
+            printf("[GPU DEBUG] Transfer Info:\n");
+            printf("[GPU DEBUG]   length:           %zu bytes\n", length);
+            printf("[GPU DEBUG]   imm_data:         0x%08x\n", imm_data);
+            printf("[GPU DEBUG]   imm_data_lsb:     %u %s\n", imm_data & 1, 
+                   (imm_data & 1) ? "(LSB=1 INVALID)" : "(LSB=0 OK)");
+            printf("[GPU DEBUG] SQ CQ Info:\n");
+            printf("[GPU DEBUG]   sq_cqe_daddr:     %p (send completion queue)\n", ep->sq_cqe_daddr);
+            printf("[GPU DEBUG]   sq_cqe_num:       %u (max send CQEs)\n", ep->sq_cqe_num);
+            printf("[GPU DEBUG] ===========================================\n");
             uct_rc_mlx5_gda_wqe_prepare_put_with_imm(ep, uct_rc_mlx5_gda_get_wqe_ptr(ep, wqe_idx), wqe_idx,
                 cflag, remote_address, rkey,
                 imm_data, length, lkey, reinterpret_cast<uint64_t>(address));
@@ -360,10 +391,24 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_single(
     uct_rc_mlx5_gda_sync<level>();
 
     if (lane_id == 0) {
+        if (is_put_with_imm) {
+            printf("[GPU DEBUG] Doorbell Ring:\n");
+            printf("[GPU DEBUG]   wqe_base:         %lu\n", (unsigned long)wqe_base);
+            printf("[GPU DEBUG]   num_wqes:         1\n");
+            printf("[GPU DEBUG]   flags:            0x%lx\n", flags);
+            printf("[GPU DEBUG]   sq_db:            %p\n", ep->sq_db);
+            printf("[GPU DEBUG]   sq_dbrec_p:       %p\n", ep->sq_dbrec_p);
+        }
         uct_rc_mlx5_gda_db(ep, wqe_base, 1, flags);
+        if (is_put_with_imm) {
+            printf("[GPU DEBUG] Doorbell rung successfully\n");
+        }
     }
 
     uct_rc_mlx5_gda_sync<level>();
+    if (is_put_with_imm && (lane_id == 0)) {
+        printf("[GPU DEBUG] === RDMA WRITE WITH IMMEDIATE POSTED ===\n");
+    }
     return UCS_INPROGRESS;
 }
 
@@ -719,6 +764,103 @@ UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep)
     }
     
     return 0;
+}
+
+template<ucs_device_level_t level>
+UCS_F_DEVICE void uct_rc_mlx5_gda_print_rx_cq_info(uct_rc_gdaki_dev_ep_t *ep)
+{
+    /* System-wide memory fence to ensure all previous writes from NIC/system are visible */
+    __threadfence_system();
+    
+    uint32_t cqe_num = __ldg(&ep->rx_cqe_num);
+    uint32_t cq_ci = ep->rx_cq_ci;
+    uint8_t *cqe_base = (uint8_t *)__ldg((uintptr_t *)&ep->rx_cqe_daddr);
+    
+    printf("===============================================================================\n");
+    printf("[GPU DEBUG] RX CQ Info: cqe_num=%d, cq_ci=%d\n", cqe_num, cq_ci);
+    printf("===============================================================================\n");
+    
+    for (uint32_t k = 0; k < cqe_num; k++) {
+        struct mlx5_cqe64 *cqe = (struct mlx5_cqe64 *)(cqe_base + (k * sizeof(struct mlx5_cqe64)));
+        
+        /* Ensure CQE data is visible before reading - use atomic load with acquire semantics */
+        __threadfence_system();
+        
+        /* Read imm_inval_pkey with atomic acquire to ensure visibility from NIC writes */
+        uint32_t imm_val = __nv_atomic_load_n((uint32_t*)&cqe->imm_inval_pkey, 
+                                               __NV_ATOMIC_ACQUIRE, 
+                                               __NV_THREAD_SCOPE_SYSTEM);
+        volatile uint8_t op_own = cqe->op_own;
+        
+        printf("\n--- RX CQE[%u] at GPU address %p ---\n", k, (void*)cqe);
+        
+        /* Print CQE as hex dump (64 bytes per CQE) */
+        /* Use volatile reads to prevent compiler optimization */
+        for (int j = 0; j < 64; j += 16) {
+            printf("  %04x: ", j);
+            for (int i = 0; i < 16; i++) {
+                volatile uint8_t *cqe_bytes = (volatile uint8_t *)cqe;
+                printf("%02x ", cqe_bytes[j + i]);
+            }
+            printf("\n");
+        }
+        
+        /* Decode important fields */
+        printf("  Fields: imm_inval_pkey=0x%08x op_own=0x%02x\n", 
+               imm_val, op_own);
+    }
+    
+    printf("===============================================================================\n");
+    printf("[GPU DEBUG] End of RX CQ dump\n");
+    printf("===============================================================================\n");
+}
+
+template<ucs_device_level_t level>
+UCS_F_DEVICE void uct_rc_mlx5_gda_print_sq_cq_info(uct_rc_gdaki_dev_ep_t *ep)
+{
+    /* System-wide memory fence to ensure all previous writes from NIC/system are visible */
+    __threadfence_system();
+    
+    uint32_t cqe_num = __ldg(&ep->sq_cqe_num);
+    uint8_t *cqe_base = (uint8_t *)__ldg((uintptr_t *)&ep->sq_cqe_daddr);
+    
+    printf("===============================================================================\n");
+    printf("[GPU DEBUG] SQ CQ Info: cqe_num=%d\n", cqe_num);
+    printf("===============================================================================\n");
+    
+    for (uint32_t k = 0; k < cqe_num; k++) {
+        struct mlx5_cqe64 *cqe = (struct mlx5_cqe64 *)(cqe_base + (k * sizeof(struct mlx5_cqe64)));
+        
+        /* Ensure CQE data is visible before reading - use atomic load with acquire semantics */
+        __threadfence_system();
+        
+        /* Read imm_inval_pkey with atomic acquire to ensure visibility from NIC writes */
+        uint32_t imm_val = __nv_atomic_load_n((uint32_t*)&cqe->imm_inval_pkey, 
+                                               __NV_ATOMIC_ACQUIRE, 
+                                               __NV_THREAD_SCOPE_SYSTEM);
+        volatile uint8_t op_own = cqe->op_own;
+        
+        printf("\n--- SQ CQE[%u] at GPU address %p ---\n", k, (void*)cqe);
+        
+        /* Print CQE as hex dump (64 bytes per CQE) */
+        /* Use volatile reads to prevent compiler optimization */
+        for (int j = 0; j < 64; j += 16) {
+            printf("  %04x: ", j);
+            for (int i = 0; i < 16; i++) {
+                volatile uint8_t *cqe_bytes = (volatile uint8_t *)cqe;
+                printf("%02x ", cqe_bytes[j + i]);
+            }
+            printf("\n");
+        }
+        
+        /* Decode important fields */
+        printf("  Fields: imm_inval_pkey=0x%08x op_own=0x%02x\n", 
+               imm_val, op_own);
+    }
+    
+    printf("===============================================================================\n");
+    printf("[GPU DEBUG] End of SQ CQ dump\n");
+    printf("===============================================================================\n");
 }
 
 #endif
