@@ -36,6 +36,21 @@ ucs_config_field_t uct_rc_gdaki_iface_config_table[] = {
     {NULL}
 };
 
+static void uct_rc_gdaki_iface_fill_attr(uct_rc_iface_t *iface, uct_ib_qp_attr_t *attr,
+                                         unsigned max_send_wr, uct_ib_mlx5_srq_t *srq)
+{
+    attr->srq                        = NULL;
+    attr->srq_num                        = srq->srq_num;
+    attr->cap.max_send_wr            = max_send_wr;
+    attr->cap.max_recv_wr            = 0;
+    attr->cap.max_send_sge           = iface->config.tx_min_sge;
+    attr->cap.max_recv_sge           = 1;
+    attr->cap.max_inline_data        = iface->config.tx_min_inline;
+    attr->qp_type                    = iface->super.config.qp_type;
+    attr->sq_sig_all                 = !iface->config.tx_moderation;
+    attr->max_inl_cqe[UCT_IB_DIR_RX] = iface->super.config.max_inl_cqe[UCT_IB_DIR_RX];
+    attr->max_inl_cqe[UCT_IB_DIR_TX] = iface->super.config.max_inl_cqe[UCT_IB_DIR_TX];
+}
 
 ucs_status_t
 uct_rc_gdaki_alloc(size_t size, size_t align, void **p_buf, CUdeviceptr *p_orig)
@@ -113,9 +128,9 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
                               &init_attr, 0, &sq_cq_attr);
     uct_ib_mlx5_cq_calc_sizes(&iface->super.super.super, UCT_IB_DIR_RX,
                               &init_attr, 0, &rx_cq_attr);
-    uct_rc_iface_fill_attr(&iface->super.super, &qp_attr.super,
+    uct_rc_gdaki_iface_fill_attr(&iface->super.super, &qp_attr.super,
                            iface->super.super.config.tx_qp_len,
-                           iface->super.rx.srq.verbs.srq);
+                           &iface->super.rx.srq);
     uct_ib_mlx5_wq_calc_sizes(&qp_attr);
 
     sq_cq_attr.flags |= UCT_IB_MLX5_CQ_IGNORE_OVERRUN;
