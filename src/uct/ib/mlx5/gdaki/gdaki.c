@@ -217,20 +217,25 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
     dbrec.mem_id        = self->umem->umem_id;
     dbrec.offset        = ucs_offsetof(uct_rc_gdaki_dev_ep_t, sq_cq_dbrec);
     self->sq_cq.devx.dbrec = &dbrec;
+    self->sq_cq.devx.cq_buf = UCS_PTR_BYTE_OFFSET(self->ep_gpu, sq_cq_attr.umem_offset);
     status = uct_ib_mlx5_devx_create_cq_common(&iface->super.super.super,
                                                UCT_IB_DIR_TX, &sq_cq_attr,
                                                &self->sq_cq, 0, 0);
     ucs_info("[CPU DEBUG] Created send cq number: %d", self->sq_cq.cq_num);
+    ucs_info("[CPU DEBUG] Send CQ buffer pointer on GPU: %p", self->sq_cq.devx.cq_buf);
     if (status != UCS_OK) {
         goto err_umem;
     }
 
     dbrec.offset           = ucs_offsetof(uct_rc_gdaki_dev_ep_t, rx_cq_dbrec);
     self->rx_cq.devx.dbrec = &dbrec;
+    self->rx_cq.devx.cq_buf = UCS_PTR_BYTE_OFFSET(self->ep_gpu, rx_cq_attr.umem_offset);
     status = uct_ib_mlx5_devx_create_cq_common(&iface->super.super.super,
                                                UCT_IB_DIR_RX, &rx_cq_attr,
                                                &self->rx_cq, 0, 0);
     ucs_info("[CPU DEBUG] Created receive cq number: %d", self->rx_cq.cq_num);
+    ucs_info("[CPU DEBUG] Receive CQ buffer pointer: %p", self->rx_cq.devx.cq_buf);
+    ucs_info("[CPU DEBUG] Receive CQ DB record pointer on GPU: %p", UCS_PTR_BYTE_OFFSET(self->ep_gpu ,ucs_offsetof(uct_rc_gdaki_dev_ep_t, rx_cq_dbrec)));
     if (status != UCS_OK) {
         goto err_sq_cq;
     }
@@ -241,7 +246,7 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
                                                &self->sq_cq, &self->rx_cq,
                                                &self->qp.super, &self->qp,
                                                &qp_attr);
-    ucs_info("[CPU DEBUG] Created QP with QP number: %d", self->qp.super.qp_num);
+    ucs_info("[CPU DEBUG] Created QP with QP number: %d\n\n", self->qp.super.qp_num);
     if (status != UCS_OK) {
         goto err_rx_cq;
     }

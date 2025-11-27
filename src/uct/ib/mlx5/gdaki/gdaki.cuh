@@ -775,9 +775,12 @@ UCS_F_DEVICE void uct_rc_mlx5_gda_print_rx_cq_info(uct_rc_gdaki_dev_ep_t *ep)
     uint32_t cqe_num = __ldg(&ep->rx_cqe_num);
     uint32_t cq_ci = ep->rx_cq_ci;
     uint8_t *cqe_base = (uint8_t *)__ldg((uintptr_t *)&ep->rx_cqe_daddr);
-    
+    uint32_t *dbrec_ptr = ep->rx_cq_dbrec;
     printf("===============================================================================\n");
-    printf("[GPU DEBUG] RX CQ Info: cqe_num=%d, cq_ci=%d\n", cqe_num, cq_ci);
+    printf("[GPU DEBUG] RX CQ Info: cqe_num=%d, cq_ci=%d, DB Record: rcv_counter=%04x, send_counter=%04x\n",
+           cqe_num, cq_ci,
+           doca_gpu_dev_verbs_bswap32(dbrec_ptr[0]) & 0xFFFF,
+           doca_gpu_dev_verbs_bswap32(dbrec_ptr[1]) & 0xFFFF);
     printf("===============================================================================\n");
     
     for (uint32_t k = 0; k < cqe_num; k++) {

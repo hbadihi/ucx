@@ -585,6 +585,8 @@ uct_ib_mlx5_devx_create_cq_common(uct_ib_iface_t *iface, uct_ib_dir_t dir,
     /* Set DB record umem related bits */
     UCT_IB_MLX5DV_SET(cqc, cqctx, dbr_umem_id, cq->devx.dbrec->mem_id);
     UCT_IB_MLX5DV_SET64(cqc, cqctx, dbr_addr, cq->devx.dbrec->offset);
+    ucs_info("[CPU DEBUG] In CQ creation, set DB record umem ID: %d", cq->devx.dbrec->mem_id);
+    ucs_info("[CPU DEBUG] In CQ creation, set DB record offset: %ld", cq->devx.dbrec->offset);
 
     /* Set EQN related bits */
     if (mlx5dv_devx_query_eqn(dev->ibv_context,
@@ -611,6 +613,8 @@ uct_ib_mlx5_devx_create_cq_common(uct_ib_iface_t *iface, uct_ib_dir_t dir,
     /* Set CQ umem related bits */
     UCT_IB_MLX5DV_SET(create_cq_in, in, cq_umem_id, cq->devx.mem.mem->umem_id);
     UCT_IB_MLX5DV_SET64(create_cq_in, in, cq_umem_offset, attr->umem_offset);
+    ucs_info("[CPU DEBUG] In CQ creation, set CQ umem offset: %ld", attr->umem_offset);
+    ucs_info("[CPU DEBUG] In CQ creation, set CQ umem ID: %d", cq->devx.mem.mem->umem_id);
 
     UCT_IB_MLX5DV_SET(cqc, cqctx, log_cq_size, log_cq_size);
     UCT_IB_MLX5DV_SET(cqc, cqctx, cqe_sz, (attr->cqe_size == 128) ? 1 : 0);
