@@ -345,37 +345,6 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_single(
         }
 
         if (is_put_with_imm) {
-            printf("[GPU DEBUG] === RDMA WRITE WITH IMMEDIATE OPERATION ===\n");
-            printf("[GPU DEBUG] QP Info:\n");
-            printf("[GPU DEBUG]   local_qp_num:     0x%x\n", ep->sq_num);
-            printf("[GPU DEBUG]   remote_qp:        (routing via Address Handle)\n");
-            printf("[GPU DEBUG]   sq_wqe_num:       %u (total WQEs)\n", ep->sq_wqe_num);
-            printf("[GPU DEBUG] WQE Info:\n");
-            printf("[GPU DEBUG]   wqe_base:         %lu\n", (unsigned long)wqe_base);
-            printf("[GPU DEBUG]   wqe_idx:          %u\n", wqe_idx);
-            printf("[GPU DEBUG]   wqe_ptr:          %p (hardware descriptor address)\n", uct_rc_mlx5_gda_get_wqe_ptr(ep, wqe_idx));
-            printf("[GPU DEBUG]   sq_wqe_daddr:     %p (send queue base)\n", ep->sq_wqe_daddr);
-            printf("[GPU DEBUG]   cflag:            0x%x %s\n", cflag, 
-                   (cflag & DOCA_GPUNETIO_MLX5_WQE_CTRL_CQ_UPDATE) ? "(CQ_UPDATE)" : "");
-            printf("[GPU DEBUG]   completion:       %p\n", comp);
-            if (comp != nullptr) {
-                printf("[GPU DEBUG]   comp->wqe_idx:    %lu\n", (unsigned long)comp->wqe_idx);
-            }
-            printf("[GPU DEBUG] Memory Info:\n");
-            printf("[GPU DEBUG]   local_addr:       %p\n", address);
-            printf("[GPU DEBUG]   local_addr_u64:   0x%lx\n", reinterpret_cast<uint64_t>(address));
-            printf("[GPU DEBUG]   lkey:             0x%x (big-endian)\n", lkey);
-            printf("[GPU DEBUG]   remote_addr:      0x%lx\n", remote_address);
-            printf("[GPU DEBUG]   rkey:             0x%x (big-endian)\n", rkey);
-            printf("[GPU DEBUG] Transfer Info:\n");
-            printf("[GPU DEBUG]   length:           %zu bytes\n", length);
-            printf("[GPU DEBUG]   imm_data:         0x%08x\n", imm_data);
-            printf("[GPU DEBUG]   imm_data_lsb:     %u %s\n", imm_data & 1, 
-                   (imm_data & 1) ? "(LSB=1 INVALID)" : "(LSB=0 OK)");
-            printf("[GPU DEBUG] SQ CQ Info:\n");
-            printf("[GPU DEBUG]   sq_cqe_daddr:     %p (send completion queue)\n", ep->sq_cqe_daddr);
-            printf("[GPU DEBUG]   sq_cqe_num:       %u (max send CQEs)\n", ep->sq_cqe_num);
-            printf("[GPU DEBUG] ===========================================\n");
             uct_rc_mlx5_gda_wqe_prepare_put_with_imm(ep, uct_rc_mlx5_gda_get_wqe_ptr(ep, wqe_idx), wqe_idx,
                 cflag, remote_address, rkey,
                 imm_data, length, lkey, reinterpret_cast<uint64_t>(address));
@@ -391,24 +360,10 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_single(
     uct_rc_mlx5_gda_sync<level>();
 
     if (lane_id == 0) {
-        if (is_put_with_imm) {
-            printf("[GPU DEBUG] Doorbell Ring:\n");
-            printf("[GPU DEBUG]   wqe_base:         %lu\n", (unsigned long)wqe_base);
-            printf("[GPU DEBUG]   num_wqes:         1\n");
-            printf("[GPU DEBUG]   flags:            0x%lx\n", flags);
-            printf("[GPU DEBUG]   sq_db:            %p\n", ep->sq_db);
-            printf("[GPU DEBUG]   sq_dbrec_p:       %p\n", ep->sq_dbrec_p);
-        }
         uct_rc_mlx5_gda_db(ep, wqe_base, 1, flags);
-        if (is_put_with_imm) {
-            printf("[GPU DEBUG] Doorbell rung successfully\n");
-        }
     }
 
     uct_rc_mlx5_gda_sync<level>();
-    if (is_put_with_imm && (lane_id == 0)) {
-        printf("[GPU DEBUG] === RDMA WRITE WITH IMMEDIATE POSTED ===\n");
-    }
     return UCS_INPROGRESS;
 }
 
@@ -696,7 +651,7 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_put_with_imm(
 }
 
 template<ucs_device_level_t level>
-UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep)
+UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep, uint32_t *received_imm)
 {
     // 1. Calculate CQE pointer
     uint8_t *cqe_base = (uint8_t *)__ldg((uintptr_t *)&ep->rx_cqe_daddr);
@@ -729,6 +684,10 @@ UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep)
     printf("[GPU DEBUG] poll_recv_cq: Received immediate data: %#x (LE)\n", 
            doca_gpu_dev_verbs_bswap32(old_raw_val));
     
+    if (received_imm) {
+        *received_imm = doca_gpu_dev_verbs_bswap32(old_raw_val);
+    }
+
         // 5. Update Doorbell Record for the RX CQ
         uint32_t new_cqe_ci = cqe_ci + 1;
 

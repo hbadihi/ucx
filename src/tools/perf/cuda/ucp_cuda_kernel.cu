@@ -265,7 +265,7 @@ ucp_perf_cuda_send_async(const ucp_perf_cuda_params &params,
     case UCX_PERF_CMD_PUT_WITH_IMM: {
         // Ensure LSB = 0: use even values only (multiply idx by 2)
         // This allows receiver to detect arrival by checking LSB change from 1 -> 0
-        uint32_t imm_data = 0xDEAD0000 + (idx << 1);  // idx * 2 ensures LSB = 0
+        uint32_t imm_data = 0xDEAD0000 + (idx << 4);
         *params.counter_send = idx + 1;
         return ucp_device_put_single_with_imm<level>(params.mem_list,
                                                      params.indices[0], 0, 0,
@@ -305,11 +305,9 @@ ucp_perf_cuda_send_sync(ucp_perf_cuda_params &params, ucx_perf_counter_t idx,
         return UCS_OK;
     }
 
-    printf("ucp_perf_cuda_send_sync Waiting for completion of request\n");
     do {
         status = ucp_device_progress_req<level>(req);
     } while (status == UCS_INPROGRESS);
-    printf("ucp_perf_cuda_send_sync Request completed with status %d\n", status);
     return status;
 }
 
@@ -432,7 +430,7 @@ ucp_perf_cuda_put_latency_kernel(ucx_perf_cuda_context &ctx,
 
 template<ucs_device_level_t level, ucx_perf_cmd_t cmd>
 __global__ void
-ucp_perf_cuda_put_with_imm_latency_kernel(ucx_perf_cuda_context &ctx,
+ucp_perf_cuda_put_with_imm_correctness_kernel(ucx_perf_cuda_context &ctx,
                                           ucp_perf_cuda_params params,
                                           bool is_sender)
 {
@@ -446,7 +444,6 @@ ucp_perf_cuda_put_with_imm_latency_kernel(ucx_perf_cuda_context &ctx,
     // Get device endpoint for CQ polling
     uct_device_ep_t *device_ep = params.mem_list->uct_device_eps[0];
     auto ep = reinterpret_cast<uct_rc_gdaki_dev_ep_t*>(device_ep);
-
     for (ucx_perf_counter_t idx = 0; idx < max_iters; idx++) {
         if (is_sender) {
             // Sender: Send PUT with immediate
@@ -455,9 +452,15 @@ ucp_perf_cuda_put_with_imm_latency_kernel(ucx_perf_cuda_context &ctx,
                 ucs_device_error("sender send failed: %d", status);
                 break;
             }
-            printf("Sender sent PUT with immediate ended with success\n");
+            ucs_device_debug("Sender sent PUT with immediate ended with success\n");
             // Poll CQ for receiver's response
-            while (!uct_rc_mlx5_gda_poll_recv_cq<level>(ep)) {
+            int poll_iter = 0;
+            while (!uct_rc_mlx5_gda_poll_recv_cq<level>(ep, nullptr)) {
+                if (++poll_iter > 5) {
+                    ucs_device_error("sender polling timed out");
+                    status = UCS_ERR_TIMED_OUT;
+                    break;
+                }
                 // Print CQ info and sleep for 5 seconds (split into multiple calls due to 32-bit limit)
                 uct_rc_mlx5_gda_print_sq_cq_info<level>(ep);
                 for (int i = 0 ; i < 5000; i++)
@@ -465,9 +468,19 @@ ucp_perf_cuda_put_with_imm_latency_kernel(ucx_perf_cuda_context &ctx,
                     __nanosleep(1000000000U);  // 1 second
                 }
             }
+            if (status != UCS_OK) {
+                break;
+            }
         } else {
             // Receiver: Poll CQ for incoming PUT with immediate
-            while (!uct_rc_mlx5_gda_poll_recv_cq<level>(ep)) {
+            uint32_t received_imm = 0;
+            int poll_iter = 0;
+            while (!uct_rc_mlx5_gda_poll_recv_cq<level>(ep, &received_imm)) {
+                if (++poll_iter > 5) {
+                    ucs_device_error("receiver polling timed out");
+                    status = UCS_ERR_TIMED_OUT;
+                    break;
+                }
                 // Print CQ info and sleep for 5 seconds (split into multiple calls due to 32-bit limit)
                 uct_rc_mlx5_gda_print_rx_cq_info<level>(ep);
                 for (int i = 0 ; i < 5000; i++)
@@ -475,6 +488,19 @@ ucp_perf_cuda_put_with_imm_latency_kernel(ucx_perf_cuda_context &ctx,
                             __nanosleep(1000000000U);  // 1 second
                 }
             }
+            if (status != UCS_OK) {
+                break;
+            }
+            
+            uint32_t expected_imm = 0xDEAD0000 + (idx << 4);
+            if (received_imm == expected_imm) {
+                ucs_device_debug("Receiver VERIFIED correct immediate data: 0x%x for idx: %lu\n", received_imm, idx);
+            } else {
+                ucs_device_error("Receiver ERROR: Expected immediate 0x%x, got 0x%x for idx: %lu\n", expected_imm, received_imm, idx);
+                status = UCS_ERR_IO_ERROR;
+                break;
+            }
+
             // Send response back
             status = ucp_perf_cuda_send_sync<level, cmd>(params, idx, req);
             if (status != UCS_OK) {
@@ -521,7 +547,7 @@ public:
         ucx_perf_test_start_clock(&m_perf);
 
         if (m_perf.params.command == UCX_PERF_CMD_PUT_WITH_IMM) {
-            UCX_PERF_KERNEL_DISPATCH(m_perf, ucp_perf_cuda_put_with_imm_latency_kernel,
+            UCX_PERF_KERNEL_DISPATCH(m_perf, ucp_perf_cuda_put_with_imm_correctness_kernel,
                                      *m_gpu_ctx, params_handler.get_params(),
                                      my_index);
         } else {
