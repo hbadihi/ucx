@@ -663,10 +663,10 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_check_completion(
 
     pi = uct_rc_mlx5_gda_parse_cqe(ep, &wqe_cnt, &opcode);
 
-    if (pi < comp->wqe_idx) {
+    if ((int64_t)pi < (int64_t)comp->wqe_idx) {
         return UCS_INPROGRESS;
     }
-
+    printf("[GPU DEBUG] opcode : %x\n", opcode);
     if (opcode == MLX5_CQE_REQ_ERR) {
         uint16_t wqe_idx = wqe_cnt & (ep->sq_wqe_num - 1);
         auto wqe_ptr     = uct_rc_mlx5_gda_get_wqe_ptr(ep, wqe_idx);
@@ -689,7 +689,7 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_put_with_imm(
             tl_mem_elem);
 
     return uct_rc_mlx5_gda_ep_single<level>(ep, tl_mem_elem, address, mem_elem->lkey, remote_address,
-                                            mem_elem->rkey, 0,
+                                            mem_elem->rkey, 1,
                                             flags, comp, MLX5_OPCODE_RDMA_WRITE_IMM,
                                             false, 0, true, imm_data);
     
