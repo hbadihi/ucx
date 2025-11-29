@@ -581,7 +581,7 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_check_completion(
 
     pi = uct_rc_mlx5_gda_parse_cqe(ep, &wqe_cnt, &opcode);
 
-    if (pi < comp->wqe_idx) {
+    if ((int64_t)pi < (int64_t)comp->wqe_idx) {
         return UCS_INPROGRESS;
     }
 
