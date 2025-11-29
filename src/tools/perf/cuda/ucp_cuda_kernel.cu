@@ -415,6 +415,8 @@ ucp_perf_cuda_put_latency_kernel(ucx_perf_cuda_context &ctx,
         reporter.update_report(idx + 1);
     }
 
+
+    *params.counter_recv = 0;
     ctx.status = status;
 }
 
