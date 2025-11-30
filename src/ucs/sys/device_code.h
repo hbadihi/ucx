@@ -54,6 +54,22 @@ ucs_device_level_name(ucs_device_level_t level)
 
 
 /*
+ * Read a 32-bit atomic value from a global memory address.
+ */
+UCS_F_DEVICE uint32_t ucs_device_atomic32_read(const uint32_t *ptr)
+{
+    uint32_t ret;
+#ifdef __NVCC__
+    asm volatile("ld.acquire.sys.global.u32 %0, [%1];"
+                 : "=r"(ret)
+                 : "l"(ptr));
+#else
+    ret = *ptr;
+#endif
+    return ret;
+}
+
+/*
  * Read a 64-bit atomic value from a global memory address.
  */
 UCS_F_DEVICE uint64_t ucs_device_atomic64_read(const uint64_t *ptr)

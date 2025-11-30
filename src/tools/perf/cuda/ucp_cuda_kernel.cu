@@ -141,7 +141,8 @@ public:
 private:
     static bool has_counter(const ucx_perf_context_t &perf)
     {
-        return (perf.params.command != UCX_PERF_CMD_PUT_SINGLE);
+        return (perf.params.command != UCX_PERF_CMD_PUT_SINGLE) &&
+               (perf.params.command != UCX_PERF_CMD_PUT_WITH_IMM);
     }
 
     void init_mem_list(const ucx_perf_context_t &perf)
@@ -248,6 +249,54 @@ private:
     ucp_perf_cuda_params m_params;
 };
 
+UCS_F_DEVICE void ucx_perf_cuda_wait_sn_with_imm(uint32_t *sn, uint32_t value, uct_rc_gdaki_dev_ep_t *ep)
+{
+    if (threadIdx.x == 0) {
+        while (ucs_device_atomic32_read(sn) < value) {
+            uct_rc_mlx5_gda_poll_recv_cq<UCS_DEVICE_LEVEL_THREAD>(ep);
+        }
+    }
+    __syncthreads();
+}
+
+class ucx_perf_cuda_counter {
+public:
+    __device__
+    ucx_perf_cuda_counter(const ucp_perf_cuda_params &params, bool use_imm)
+        : m_use_imm(use_imm), m_ep(nullptr), m_imm_counter(nullptr)
+    {
+        if (m_use_imm) {
+            uct_device_ep_t *device_ep = params.mem_list->uct_device_eps[0];
+            m_ep = reinterpret_cast<uct_rc_gdaki_dev_ep_t*>(device_ep);
+            m_imm_counter = &m_ep->signals[0];
+        }
+        m_regular_counter = params.counter_recv;
+    }
+
+    __device__ inline void wait(uint32_t expected_value)
+    {
+        if (m_use_imm) {
+            ucx_perf_cuda_wait_sn_with_imm(m_imm_counter, expected_value, m_ep);
+        } else {
+            ucx_perf_cuda_wait_sn(m_regular_counter, expected_value);
+        }
+    }
+
+    __device__ inline void reset()
+    {
+        if (m_use_imm) {
+            *m_imm_counter = 0;
+        }
+        *m_regular_counter = 0;
+    }
+
+private:
+    bool m_use_imm;
+    uct_rc_gdaki_dev_ep_t *m_ep;
+    uint32_t *m_imm_counter;
+    uint64_t *m_regular_counter;
+};
+
 template<ucs_device_level_t level, ucx_perf_cmd_t cmd>
 UCS_F_DEVICE ucs_status_t
 ucp_perf_cuda_send_async(const ucp_perf_cuda_params &params,
@@ -261,6 +310,19 @@ ucp_perf_cuda_send_async(const ucp_perf_cuda_params &params,
                                             0, 0,
                                             params.length + ONESIDED_SIGNAL_SIZE,
                                             0, flags, req);
+    case UCX_PERF_CMD_PUT_WITH_IMM: {
+        // Ensure LSB = 0: use even values only (multiply idx by 2)
+        // This allows receiver to detect arrival by checking LSB change from 1 -> 0
+        
+        // Layout (MSB -> LSB): | Signal ID (10b) | Signal Value (20b) | Signal OP (1b) | Processed (1b) |
+        uint32_t counter_signal_id = 0;
+        uint32_t increment_by = 1;
+        uint32_t imm_data = ((counter_signal_id << 22) | (increment_by << 2) | (UCT_RC_GDAKI_SIGNAL_OP_ADD << 1) | 0);
+        return ucp_device_put_single_with_imm<level>(params.mem_list,
+                                                     params.indices[0], 0, 0,
+                                                     0, // 0 bytes - only immediate data
+                                                     imm_data, 0, flags, req);
+    }
     case UCX_PERF_CMD_PUT_MULTI:
         return ucp_device_put_multi<level>(params.mem_list, 1, 0, flags, req);
     case UCX_PERF_CMD_PUT_PARTIAL: {
@@ -297,7 +359,7 @@ ucp_perf_cuda_send_sync(ucp_perf_cuda_params &params, ucx_perf_counter_t idx,
     do {
         status = ucp_device_progress_req<level>(req);
     } while (status == UCS_INPROGRESS);
-
+    
     return status;
 }
 
@@ -386,13 +448,17 @@ ucp_perf_cuda_put_bw_kernel(ucx_perf_cuda_context &ctx,
 template<ucs_device_level_t level, ucx_perf_cmd_t cmd>
 __global__ void
 ucp_perf_cuda_put_latency_kernel(ucx_perf_cuda_context &ctx,
-                                 ucp_perf_cuda_params params, bool is_sender)
+                                 ucp_perf_cuda_params params, 
+                                 bool is_sender, 
+                                 bool is_with_imm)
 {
     extern __shared__ ucp_device_request_t shared_requests[];
     ucx_perf_counter_t max_iters = ctx.max_iters;
     ucs_status_t status          = UCS_OK;
     unsigned thread_index        = ucx_perf_cuda_thread_index<level>(threadIdx.x);
     ucp_device_request_t *req    = &shared_requests[thread_index];
+    
+    ucx_perf_cuda_counter counter(params, is_with_imm);
     ucx_perf_cuda_reporter reporter(ctx);
 
     for (ucx_perf_counter_t idx = 0; idx < max_iters; idx++) {
@@ -402,9 +468,9 @@ ucp_perf_cuda_put_latency_kernel(ucx_perf_cuda_context &ctx,
                 ucs_device_error("sender send failed: %d", status);
                 break;
             }
-            ucx_perf_cuda_wait_sn(params.counter_recv, idx + 1);
+            counter.wait(idx + 1);
         } else {
-            ucx_perf_cuda_wait_sn(params.counter_recv, idx + 1);
+            counter.wait(idx + 1);
             status = ucp_perf_cuda_send_sync<level, cmd>(params, idx, req);
             if (status != UCS_OK) {
                 ucs_device_error("receiver send failed: %d", status);
@@ -415,10 +481,10 @@ ucp_perf_cuda_put_latency_kernel(ucx_perf_cuda_context &ctx,
         reporter.update_report(idx + 1);
     }
 
-
-    *params.counter_recv = 0;
+    counter.reset();
     ctx.status = status;
 }
+
 
 __global__ void
 ucp_perf_cuda_wait_bw_kernel(ucx_perf_cuda_context &ctx,
@@ -452,8 +518,8 @@ public:
         ucx_perf_test_start_clock(&m_perf);
 
         UCX_PERF_KERNEL_DISPATCH(m_perf, ucp_perf_cuda_put_latency_kernel,
-                                 *m_gpu_ctx, params_handler.get_params(),
-                                 my_index);
+                                    *m_gpu_ctx, params_handler.get_params(),
+                                    my_index, m_perf.params.command == UCX_PERF_CMD_PUT_WITH_IMM);
         CUDA_CALL_RET(UCS_ERR_NO_DEVICE, cudaGetLastError);
 
         wait_for_kernel();
