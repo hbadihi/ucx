@@ -357,6 +357,34 @@ UCS_F_DEVICE ucs_status_t ucp_device_put_multi(
                                     flags, comp);
 }
 
+template<ucs_device_level_t level = UCS_DEVICE_LEVEL_THREAD>
+UCS_F_DEVICE ucs_status_t ucp_device_put_multi_with_imm(
+        ucp_device_mem_list_handle_h mem_list_h, uint64_t imm_data,
+        uint64_t flags, ucp_device_request_t *req)
+{
+    void *const *addresses           = mem_list_h->local_addrs;
+    const uint64_t *remote_addresses = mem_list_h->remote_addrs;
+    const size_t *lengths            = mem_list_h->lengths;
+    uint64_t signal_remote_scratchpad_address =
+            mem_list_h->remote_addrs[mem_list_h->mem_list_length - 1];
+    const uct_device_mem_element_t *uct_mem_list;
+    uct_device_completion_t *comp;
+    uct_device_ep_t *device_ep;
+    ucs_status_t status;
+
+    status = ucp_device_prepare_send(mem_list_h, 0, req, device_ep,
+                                     uct_mem_list, comp);
+    if (status != UCS_OK) {
+        return status;
+    }
+
+    return UCP_DEVICE_SEND_BLOCKING(level, uct_device_ep_put_multi_with_imm, device_ep,
+                                    req, uct_mem_list, mem_list_h->mem_list_length, addresses,
+                                    remote_addresses, lengths, imm_data,
+                                    signal_remote_scratchpad_address, flags,
+                                    comp);
+}
+
 
 /**
  * @ingroup UCP_DEVICE

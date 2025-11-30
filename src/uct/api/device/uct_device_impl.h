@@ -230,6 +230,25 @@ UCS_F_DEVICE ucs_status_t uct_device_ep_put_multi(
 }
 
 
+template<ucs_device_level_t level>
+UCS_F_DEVICE ucs_status_t uct_device_ep_put_multi_with_imm(
+        uct_device_ep_h device_ep, const uct_device_mem_element_t *mem_list,
+        unsigned mem_list_count, void *const *addresses,
+        const uint64_t *remote_addresses, const size_t *lengths,
+        uint64_t imm_data,uint64_t signal_remote_scratchpad_address, uint64_t flags, uct_device_completion_t *comp)
+{
+    if (device_ep->uct_tl_id == UCT_DEVICE_TL_RC_MLX5_GDA) {
+        return uct_rc_mlx5_gda_ep_put_multi_with_imm<level>(device_ep, mem_list,
+                                                   mem_list_count, addresses,
+                                                   remote_addresses, lengths,
+                                                   imm_data,
+                                                   signal_remote_scratchpad_address,
+                                                   flags, comp);
+    }
+
+    return UCS_ERR_UNSUPPORTED;
+}
+
 /**
  * @ingroup UCP_DEVICE
  * @brief Posts few put operations followed by one atomic increment operation.
