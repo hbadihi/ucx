@@ -133,7 +133,8 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
     uct_ib_mlx5_wq_calc_sizes(&qp_attr);
 
     sq_cq_attr.flags |= UCT_IB_MLX5_CQ_IGNORE_OVERRUN;
-
+    rx_cq_attr.flags |= UCT_IB_MLX5_CQ_IGNORE_OVERRUN;
+    
     qp_attr.mmio_mode = UCT_IB_MLX5_MMIO_MODE_DB;
 
     /* Disable inline scatter to TX CQE */
@@ -149,9 +150,6 @@ static UCS_CLASS_INIT_FUNC(uct_rc_gdaki_ep_t, const uct_ep_params_t *params)
      *   - Atomic operation metadata (atomic_va, atomic_lkey)
      *   - Doorbell records (32 bytes total):
      *       * sq_cq_dbrec[2]: SQ CQ doorbell record (8 bytes, 2 x uint32_t)
-     *                         [0] = consumer counter
-     *                         [1] = reserved/flags
-     *       * rx_cq_dbrec[2]: RX CQ doorbell record (8 bytes, 2 x uint32_t)
      *                         [0] = consumer counter
      *                         [1] = reserved/flags
      *       * sq_dbrec[2]:    SQ doorbell record (8 bytes, 2 x uint32_t)

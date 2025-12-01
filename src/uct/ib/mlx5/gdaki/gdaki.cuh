@@ -813,17 +813,6 @@ UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep)
         } else {
             *signal_ptr = signal_val;
         }
-        // 5. Update Doorbell Record for the RX CQ
-        uint32_t new_cqe_ci = cqe_ci + 1;
-
-        // Doorbell Record Update (Store Release)
-        __nv_atomic_store_n(
-            &ep->rx_cq_dbrec[0],                      // ptr
-            doca_gpu_dev_verbs_bswap32(new_cqe_ci),   // val
-            __NV_ATOMIC_RELEASE,                      // order
-            __NV_THREAD_SCOPE_SYSTEM                  // scope (Doorbell goes to System!)
-        );
-        
         /* SRQ DBR UPDATE for WQE */
         // To replenish the SRQ (allow NIC to reuse the WQE we just consumed),
 
