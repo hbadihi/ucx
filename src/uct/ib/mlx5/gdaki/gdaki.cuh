@@ -828,7 +828,7 @@ UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep)
                 (uint32_t*)ep->rx_dbrec_p,                      // ptr
                 doca_gpu_dev_verbs_bswap32(new_pi),         // val
                 __NV_ATOMIC_RELEASE,                            // order
-                __NV_THREAD_SCOPE_SYSTEM                        // scope
+                __NV_THREAD_SCOPE_DEVICE                        // scope
             );
         }
 
