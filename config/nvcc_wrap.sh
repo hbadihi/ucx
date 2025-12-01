@@ -34,7 +34,7 @@ while [[ $# -gt 0 ]]; do
             args="$args -Xcompiler -fPIC"
             shift
             ;;
-        -O*|-I*|-D*|-G|-g|-MD|-MMD|-gencode=*|-std=*)
+        -O*|-I*|-D*|-G|-g|-MD|-MMD|-gencode=*|-std=*|-lineinfo|--lineinfo)
             args="$args $1"
             shift
             ;;
