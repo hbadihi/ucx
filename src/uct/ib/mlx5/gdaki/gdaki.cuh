@@ -808,7 +808,7 @@ UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep)
         uint32_t *signal_ptr = (uint32_t *)&ep->signals[signal_id];
         
         if (signal_op == UCT_RC_GDAKI_SIGNAL_OP_ADD) {
-            atomicAdd(signal_ptr, signal_val);
+            *signal_ptr += signal_val;
         } else {
             *signal_ptr = signal_val;
         }
@@ -816,7 +816,8 @@ UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep)
         // To replenish the SRQ (allow NIC to reuse the WQE we just consumed),
 
         // We maintain the PI counter locally to avoid reading the DBR from host memory.
-        uint32_t old_pi = atomicAdd(&ep->rx_wq_pi, 1);
+        uint32_t old_pi = ep->rx_wq_pi ;
+        ep->rx_wq_pi += 1;
         uint32_t half_rq_wqe_num = ep->rx_wqe_num >> 1;
         uint32_t check_index = old_pi + 1;
         // Doorbell Record Update (Store Release)
