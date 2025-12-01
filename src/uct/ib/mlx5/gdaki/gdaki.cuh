@@ -781,9 +781,8 @@ UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep)
     uint32_t *imm_ptr = (uint32_t *)&cqe->imm_inval_pkey;
 
     // 2. Prepare mask for Logical LSB (bit 0) in Big Endian memory
-    // 0x1 (LE) -> 0x01000000 (BE)
-    uint32_t be_mask = doca_gpu_dev_verbs_bswap32(1);
-
+    
+    uint32_t be_mask = 0x01000000;
     // 3. Atomically OR the bit. Returns OLD value.
     uint32_t old_raw_val = __nv_atomic_fetch_or(imm_ptr, be_mask, __NV_ATOMIC_ACQUIRE, __NV_THREAD_SCOPE_DEVICE);
 
@@ -792,7 +791,7 @@ UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep)
     if ((old_raw_val & be_mask) == 0) {
         // We won!
         /* Make sure we don't read a too advanced CQE */
-        if (cqe_ci < READ_ONCE(ep->rx_cq_ci)) {
+        [[unlikely]] if (cqe_ci < READ_ONCE(ep->rx_cq_ci)) {
             atomicAnd(imm_ptr, ~be_mask);
             return 0;
         }
