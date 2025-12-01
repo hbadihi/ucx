@@ -818,17 +818,19 @@ UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep)
 
         // We maintain the PI counter locally to avoid reading the DBR from host memory.
         uint32_t old_pi = atomicAdd(&ep->rx_wq_pi, 1);
-        
+        uint32_t half_rq_wqe_num = ep->rx_wqe_num >> 1;
+        uint32_t check_index = old_pi + 1;
         // Doorbell Record Update (Store Release)
-        // Note: This is a blind write, relying on the local counter for serialization.
-        // In high contention, writes to the DBR might be out of order (e.g. 11 then 10),
-        // but since we only increment, the HW should eventually see the latest value.
-        __nv_atomic_store_n(
-            (uint32_t*)ep->rx_dbrec_p,                      // ptr
-            doca_gpu_dev_verbs_bswap32(old_pi + 1),         // val
-            __NV_ATOMIC_RELEASE,                            // order
-            __NV_THREAD_SCOPE_SYSTEM                        // scope
-        );
+
+        [[unlikely]] if ((check_index & (half_rq_wqe_num - 1)) == 0) {
+            uint32_t new_pi = check_index;
+            __nv_atomic_store_n(
+                (uint32_t*)ep->rx_dbrec_p,                      // ptr
+                doca_gpu_dev_verbs_bswap32(new_pi),         // val
+                __NV_ATOMIC_RELEASE,                            // order
+                __NV_THREAD_SCOPE_SYSTEM                        // scope
+            );
+        }
 
         // 6. Advance CQ consumer index
         __nv_atomic_add(&ep->rx_cq_ci, 1, __NV_ATOMIC_RELEASE, __NV_THREAD_SCOPE_DEVICE);

@@ -524,6 +524,7 @@ uct_rc_gdaki_ep_get_device_ep(uct_ep_h tl_ep, uct_device_ep_h *device_ep_p)
         dev_ep.rx_dbrec_p   = (uint32_t*)iface->srq_dbrec_gpu; /* Points to GPU! */
         dev_ep.rx_db        = NULL; /* SRQ doesn't use UAR doorbell */
         dev_ep.rx_wq_pi     = iface->super.rx.srq.sw_pi;
+        dev_ep.rx_wqe_num     = iface->super.rx.srq.mask + 1;
 
         status = UCT_CUDADRV_FUNC_LOG_ERR(cuMemcpyHtoD(
                 (CUdeviceptr)ep->ep_gpu, &dev_ep, sizeof(dev_ep)));
