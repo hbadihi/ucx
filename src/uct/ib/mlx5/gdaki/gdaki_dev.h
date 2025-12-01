@@ -35,6 +35,7 @@ typedef struct {
     uint32_t                     *rx_dbrec_p;
     uint64_t                     *rx_db;
     uint16_t                     sq_wqe_num;
+    uint16_t                     rx_wqe_num;
     uint32_t                     sq_num;
     uint16_t                     sq_fc_mask;
     uint32_t                     *signals;
