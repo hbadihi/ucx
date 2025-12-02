@@ -240,10 +240,11 @@ UCS_F_DEVICE void uct_rc_mlx5_gda_wqe_prepare_put_or_imm(
     uint32_t opcode, unsigned ctrl_flags, uint64_t raddr, uint32_t rkey,
     uint64_t imm_data, uint32_t bytes, uint32_t lkey, uint64_t laddr)
 {
+    bool is_imm = opcode == MLX5_OPCODE_RDMA_WRITE_IMM;
     uint64_t *dseg_ptr  = (uint64_t*)wqe_ptr + 4;
     uint64_t *cseg_ptr  = (uint64_t*)wqe_ptr;
     uint64_t *rseg_ptr  = (uint64_t*)wqe_ptr + 2;
-    int ds              = 3;
+    int ds              = 2 + (!is_imm);
     struct doca_gpu_dev_verbs_wqe_ctrl_seg cseg;
     struct mlx5_wqe_raddr_seg rseg;
     struct mlx5_wqe_data_seg dseg;
@@ -252,20 +253,22 @@ UCS_F_DEVICE void uct_rc_mlx5_gda_wqe_prepare_put_or_imm(
             ((uint32_t)wqe_idx << DOCA_GPUNETIO_VERBS_WQE_IDX_SHIFT) | opcode);
     cseg.qpn_ds           = doca_gpu_dev_verbs_bswap32((ep->sq_num << 8) | ds);
     cseg.fm_ce_se         = ctrl_flags;
+
     if (opcode == MLX5_OPCODE_RDMA_WRITE_IMM) {
         cseg.imm              = doca_gpu_dev_verbs_bswap32(imm_data);
+    }
+    else {
+        dseg.byte_count = doca_gpu_dev_verbs_bswap32(bytes);
+        dseg.lkey       = lkey;
+        dseg.addr       = doca_gpu_dev_verbs_bswap64(laddr);
+        doca_gpu_dev_verbs_store_wqe_seg(dseg_ptr, (uint64_t*)&(dseg));
     }
 
     rseg.raddr = doca_gpu_dev_verbs_bswap64(raddr);
     rseg.rkey  = rkey;
 
-    dseg.byte_count = doca_gpu_dev_verbs_bswap32(bytes);
-    dseg.lkey       = lkey;
-    dseg.addr       = doca_gpu_dev_verbs_bswap64(laddr);
-
     doca_gpu_dev_verbs_store_wqe_seg(cseg_ptr, (uint64_t*)&(cseg));
-    doca_gpu_dev_verbs_store_wqe_seg(rseg_ptr, (uint64_t*)&(rseg));
-    doca_gpu_dev_verbs_store_wqe_seg(dseg_ptr, (uint64_t*)&(dseg));
+    doca_gpu_dev_verbs_store_wqe_seg(rseg_ptr, (uint64_t*)&(rseg)); 
 }
 
 
@@ -274,13 +277,13 @@ UCS_F_DEVICE void uct_rc_mlx5_gda_wqe_prepare_put_with_imm(
     unsigned ctrl_flags, uint64_t raddr, uint32_t rkey,
     uint32_t imm_data, uint32_t bytes, uint32_t lkey, uint64_t laddr)
 {
-    uint64_t *dseg_ptr  = (uint64_t*)wqe_ptr + 4;
+    // uint64_t *dseg_ptr  = (uint64_t*)wqe_ptr + 4;
     uint64_t *cseg_ptr  = (uint64_t*)wqe_ptr;
     uint64_t *rseg_ptr  = (uint64_t*)wqe_ptr + 2;
-    int ds              = 3;
+    int ds              = 2;
     struct doca_gpu_dev_verbs_wqe_ctrl_seg cseg;
     struct mlx5_wqe_raddr_seg rseg;
-    struct mlx5_wqe_data_seg dseg;
+    // struct mlx5_wqe_data_seg dseg;
 
     cseg.opmod_idx_opcode = doca_gpu_dev_verbs_bswap32(
             ((uint32_t)wqe_idx << DOCA_GPUNETIO_VERBS_WQE_IDX_SHIFT) | MLX5_OPCODE_RDMA_WRITE_IMM);
@@ -291,13 +294,9 @@ UCS_F_DEVICE void uct_rc_mlx5_gda_wqe_prepare_put_with_imm(
     rseg.raddr = doca_gpu_dev_verbs_bswap64(raddr);
     rseg.rkey  = rkey;
 
-    dseg.byte_count = doca_gpu_dev_verbs_bswap32(bytes);
-    dseg.lkey       = lkey;
-    dseg.addr       = doca_gpu_dev_verbs_bswap64(laddr);
 
     doca_gpu_dev_verbs_store_wqe_seg(cseg_ptr, (uint64_t*)&(cseg));
     doca_gpu_dev_verbs_store_wqe_seg(rseg_ptr, (uint64_t*)&(rseg));
-    doca_gpu_dev_verbs_store_wqe_seg(dseg_ptr, (uint64_t*)&(dseg));
 }
 
 UCS_F_DEVICE void uct_rc_mlx5_gda_lock(int *lock) {
@@ -565,9 +564,6 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_put_multi_with_imm(
     wqe_idx = doca_gpu_dev_verbs_wqe_idx_inc_mask(wqe_base, lane_id);
     for (uint32_t i = lane_id; i < count; i += num_lanes) {
         if (i == imm_index) {
-            address        = addresses[0];
-            lkey           = mem_list[0].lkey;
-            length         = 1;
             opcode         = MLX5_OPCODE_RDMA_WRITE_IMM;
             remote_address = signal_remote_scratchpad_address;
         } else if (i < imm_index) {
