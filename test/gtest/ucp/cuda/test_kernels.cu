@@ -7,6 +7,9 @@
 #include "test_kernels.h"
 
 #include <ucp/api/device/ucp_device_impl.h>
+#include <ucp/api/device/ucp_device_types.h>
+#include <uct/ib/mlx5/gdaki/gdaki_dev.h>
+#include <uct/ib/mlx5/gdaki/gdaki.cuh>
 #include <ucs/debug/log.h>
 #include <common/cuda.h>
 
@@ -25,10 +28,20 @@ ucp_test_kernel_do_operation(const test_ucp_device_kernel_params_t &params,
                                               0, params.single.length, 0, flags,
                                               req_ptr);
         break;
+    case TEST_UCP_DEVICE_KERNEL_PUT_SINGLE_WITH_IMM:
+        status = ucp_device_put_single_with_imm<level>(
+                params.mem_list, params.single_with_imm.mem_list_index, 0, 0,
+                params.single_with_imm.length, params.single_with_imm.imm_data,
+                0, flags, req_ptr);
+        break;
     case TEST_UCP_DEVICE_KERNEL_PUT_MULTI:
         status = ucp_device_put_multi<level>(params.mem_list,
                                              params.multi.counter_inc_value, 0,
                                              flags, req_ptr);
+        break;
+    case TEST_UCP_DEVICE_KERNEL_PUT_MULTI_WITH_IMM:
+        status = ucp_device_put_multi_with_imm<level>(
+                params.mem_list, params.multi_with_imm.imm_data, flags, req_ptr);
         break;
     case TEST_UCP_DEVICE_KERNEL_PUT_MULTI_PARTIAL:
         status = ucp_device_put_multi_partial<level>(
@@ -49,7 +62,7 @@ ucp_test_kernel_do_operation(const test_ucp_device_kernel_params_t &params,
                                  params.local_counter.value);
         /* req_ptr is not used in this case */
         return UCS_OK;
-    case TEST_UCP_DEVICE_KERNEL_COUNTER_READ:
+    case TEST_UCP_DEVICE_KERNEL_COUNTER_READ: {
         uint64_t value = ucp_device_counter_read(params.local_counter.address);
         if (value != params.local_counter.value) {
             ucs_device_error("counter value mismatch: expected %lu, got %lu",
@@ -58,6 +71,29 @@ ucp_test_kernel_do_operation(const test_ucp_device_kernel_params_t &params,
         }
         /* req_ptr is not used in this case */
         return UCS_OK;
+    }
+    case TEST_UCP_DEVICE_KERNEL_SIGNAL_READ: {
+        /* Access the UCT endpoint from the mem_list handle */
+        auto uct_ep = reinterpret_cast<uct_rc_gdaki_dev_ep_t*>(
+                params.mem_list->uct_device_eps[0]);
+        /* Read the signal value from the endpoint's signals array */
+        *params.signal_read.signal_value = uct_ep->signals[params.signal_read.signal_id];
+        /* req_ptr is not used in this case */
+        return UCS_OK;
+    }
+    case TEST_UCP_DEVICE_KERNEL_POLL_RX_CQ: {
+        /* Poll the receiver's RX CQ from device code to process immediate data */
+        auto uct_ep = reinterpret_cast<uct_rc_gdaki_dev_ep_t*>(
+                params.mem_list->uct_device_eps[0]);
+        /* Poll RX CQ multiple times to ensure immediate data is processed */
+        /* Sleep between polls to give time for CQEs to arrive (totals ~1 second) */
+        for (unsigned i = 0; i < params.poll_rx_cq.num_polls; ++i) {
+            uct_rc_mlx5_gda_poll_recv_cq<level>(uct_ep);
+            __nanosleep(10000000); // 10ms sleep, 100 polls = 1 second total
+        }
+        /* req_ptr is not used in this case */
+        return UCS_OK;
+    }
     }
 
     if (UCS_STATUS_IS_ERR(status)) {

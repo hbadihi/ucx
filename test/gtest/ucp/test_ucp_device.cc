@@ -34,7 +34,7 @@ protected:
 
         mem_list(test_ucp_device &test, size_t size, unsigned count,
                  ucs_memory_type_t mem_type = UCS_MEMORY_TYPE_CUDA,
-                 mem_list_mode_t mode = MODE_DATA_ONLY);
+                 mem_list_mode_t mode = MODE_DATA_ONLY, bool use_receiver_ep = false);
         ~mem_list();
 
         void *src_ptr(unsigned index) const;
@@ -89,24 +89,28 @@ void test_ucp_device::init()
 test_ucp_device::mem_list::mem_list(test_ucp_device &test,
                                     size_t size, unsigned count,
                                     ucs_memory_type_t mem_type,
-                                    mem_list_mode_t mode)
+                                    mem_list_mode_t mode, bool use_receiver_ep)
 {
     bool has_counter  = (mode != MODE_DATA_ONLY);
     size_t data_count = (has_counter) ? count - 1 : count;
     ucs_status_t status;
+    
+    // Choose which endpoint to use for mem_list creation
+    entity &mem_list_entity = use_receiver_ep ? test.receiver() : test.sender();
+    entity &remote_entity   = use_receiver_ep ? test.sender() : test.receiver();
 
     // Prepare src and dst buffers
     for (auto i = 0; i < data_count; ++i) {
-        m_src.emplace_back(new mapped_buffer(size, test.sender(), 0, mem_type));
-        m_dst.emplace_back(new mapped_buffer(size, test.receiver(), 0, mem_type));
-        m_rkeys.push_back(m_dst.back()->rkey(test.sender()));
+        m_src.emplace_back(new mapped_buffer(size, mem_list_entity, 0, mem_type));
+        m_dst.emplace_back(new mapped_buffer(size, remote_entity, 0, mem_type));
+        m_rkeys.push_back(m_dst.back()->rkey(mem_list_entity));
         m_src.back()->pattern_fill(SEED_SRC, size);
         m_dst.back()->pattern_fill(SEED_DST, size);
     }
 
     if (has_counter) {
-        m_dst.emplace_back(new mapped_buffer(size, test.receiver(), 0, mem_type));
-        m_rkeys.push_back(m_dst.back()->rkey(test.sender()));
+        m_dst.emplace_back(new mapped_buffer(size, remote_entity, 0, mem_type));
+        m_rkeys.push_back(m_dst.back()->rkey(mem_list_entity));
         m_dst.back()->pattern_fill(SEED_DST, size);
     }
 
@@ -148,7 +152,7 @@ test_ucp_device::mem_list::mem_list(test_ucp_device &test,
         scoped_log_handler wrap_err(wrap_errors_logger);
         do {
             test.progress();
-            status = ucp_device_mem_list_create(test.sender().ep(), &params,
+            status = ucp_device_mem_list_create(mem_list_entity.ep(), &params,
                                                 &m_mem_list_h);
         } while (status == UCS_ERR_NOT_CONNECTED);
     }
@@ -548,6 +552,74 @@ protected:
                   list.dst_counter_read(counter_index))
                 << "multiplier: " << multiplier;
     }
+
+    /**
+     * Create immediate data with ADD operation.
+     * Layout: | Signal ID (10b) | Signal Value (20b) | Signal OP (1b) | Processed (1b) |
+     */
+    static uint64_t make_imm_add(unsigned signal_id, uint32_t value)
+    {
+        return (static_cast<uint64_t>(signal_id) << 22) |
+               (static_cast<uint64_t>(value & 0xFFFFF) << 2) |
+               (0ULL << 1) | /* ADD operation */
+               0ULL;         /* Processed bit = 0 */
+    }
+
+    /**
+     * Create immediate data with SET operation.
+     * Layout: | Signal ID (10b) | Signal Value (20b) | Signal OP (1b) | Processed (1b) |
+     */
+    static uint64_t make_imm_set(unsigned signal_id, uint32_t value)
+    {
+        return (static_cast<uint64_t>(signal_id) << 22) |
+               (static_cast<uint64_t>(value & 0xFFFFF) << 2) |
+               (1ULL << 1) | /* SET operation */
+               0ULL;         /* Processed bit = 0 */
+    }
+
+    /**
+     * Read signal value from endpoint via device kernel.
+     * Progresses the receiver to ensure CQEs with immediate data are processed.
+     */
+    uint64_t read_signal(ucp_device_mem_list_handle_h mem_list, unsigned signal_id,
+                        uint64_t expected_value = 0, bool wait_for_value = false)
+    {
+        mapped_buffer result_buffer(sizeof(uint64_t), receiver(), 0,
+                                     UCS_MEMORY_TYPE_CUDA);
+        
+        auto params                       = init_params();
+        params.operation                  = TEST_UCP_DEVICE_KERNEL_SIGNAL_READ;
+        params.mem_list                   = mem_list;
+        params.signal_read.signal_id      = signal_id;
+        params.signal_read.signal_value   = 
+            reinterpret_cast<uint64_t*>(result_buffer.ptr());
+        
+        if (wait_for_value) {
+            /* Wait for the receiver to process the CQE with immediate data */
+            /* Progress receiver explicitly to poll RX CQ */
+            wait_for_cond(
+                [&]() {
+                    receiver().progress();  // Progress receiver to poll RX CQ
+                    launch_kernel(params);
+                    uint64_t result;
+                    mem_buffer::copy_from(&result, result_buffer.ptr(),
+                                         sizeof(result), result_buffer.mem_type());
+                    return result == expected_value;
+                },
+                []() {}); 
+        } else {
+            /* Just progress receiver a bit and read */
+            for (int i = 0; i < 100; ++i) {
+                receiver().progress();  // Progress receiver to poll RX CQ
+            }
+            launch_kernel(params);
+        }
+        
+        uint64_t result;
+        mem_buffer::copy_from(&result, result_buffer.ptr(),
+                             sizeof(result), result_buffer.mem_type());
+        return result;
+    }
 };
 
 UCS_TEST_P(test_ucp_device_xfer, put_single)
@@ -570,6 +642,161 @@ UCS_TEST_P(test_ucp_device_xfer, put_single)
     list.dst_pattern_check(mem_list_index - 1, mem_list::SEED_DST);
     list.dst_pattern_check(mem_list_index, mem_list::SEED_SRC);
     list.dst_pattern_check(mem_list_index + 1, mem_list::SEED_DST);
+}
+
+UCS_TEST_P(test_ucp_device_xfer, put_single_with_imm)
+{
+    static constexpr size_t size = 32 * UCS_KBYTE;
+    mem_list sender_list(*this, size, 6);
+    
+    // Create a receiver-side mem_list to access receiver's endpoint signals
+    // The immediate data updates the receiver's signals, not the sender's
+    mem_list receiver_list(*this, size, 1, UCS_MEMORY_TYPE_CUDA,
+                           mem_list::MODE_DATA_ONLY, true /* use_receiver_ep */);
+
+    // Test ADD operation with non-trivial immediate value
+    // Note: put_single_with_imm sends only immediate data (0 bytes of payload)
+    static constexpr unsigned mem_list_index = 3;
+    static constexpr unsigned signal_id_add  = 3;
+    static constexpr uint32_t signal_val_add = 42;
+
+    auto params = init_params();
+    params.num_threads                    = 1; // Only one thread sends immediate data
+    params.num_iters                      = 1; // Only send immediate data once!
+    params.operation                      = TEST_UCP_DEVICE_KERNEL_PUT_SINGLE_WITH_IMM;
+    params.mem_list                       = sender_list.handle();
+    params.single_with_imm.mem_list_index = mem_list_index;
+    params.single_with_imm.address        = sender_list.src_ptr(mem_list_index);
+    params.single_with_imm.remote_address = sender_list.dst_ptr(mem_list_index);
+    params.single_with_imm.length         = 0; // 0 bytes - only immediate data
+    params.single_with_imm.imm_data       = make_imm_add(signal_id_add, signal_val_add);
+    launch_kernel(params);
+
+    // Poll receiver's RX CQ from device code to process immediate data
+    // This is where ep->signals[signal_id] gets updated
+    params.operation          = TEST_UCP_DEVICE_KERNEL_POLL_RX_CQ;
+    params.mem_list           = receiver_list.handle();
+    params.poll_rx_cq.num_polls = 100;
+    launch_kernel(params);
+
+    // Verify ADD operation: signal value should be incremented
+    // Read from receiver's endpoint signals
+    EXPECT_EQ(signal_val_add, read_signal(receiver_list.handle(), signal_id_add,
+                                          signal_val_add, true));
+
+    // Test SET operation with non-trivial immediate value
+    static constexpr unsigned signal_id_set  = 5;
+    static constexpr uint32_t signal_val_set = 0x12345;
+
+    params.num_threads                    = 1; // Only one thread sends immediate data
+    params.num_iters                      = 1; // Only send immediate data once!
+    params.operation                      = TEST_UCP_DEVICE_KERNEL_PUT_SINGLE_WITH_IMM;
+    params.mem_list                       = sender_list.handle();
+    params.single_with_imm.mem_list_index = mem_list_index;
+    params.single_with_imm.address        = sender_list.src_ptr(mem_list_index);
+    params.single_with_imm.remote_address = sender_list.dst_ptr(mem_list_index);
+    params.single_with_imm.length         = 0;
+    params.single_with_imm.imm_data       = make_imm_set(signal_id_set, signal_val_set);
+    launch_kernel(params);
+
+    // Poll receiver's RX CQ from device code to process immediate data
+    params.operation            = TEST_UCP_DEVICE_KERNEL_POLL_RX_CQ;
+    params.mem_list             = receiver_list.handle();
+    params.poll_rx_cq.num_polls = 100;
+    launch_kernel(params);
+
+    // Verify SET operation: signal value should be set to the specified value
+    EXPECT_EQ(signal_val_set, read_signal(receiver_list.handle(), signal_id_set,
+                                          signal_val_set, true));
+
+    // Verify other signal was not affected (ADD signal should still have its value)
+    EXPECT_EQ(signal_val_add, read_signal(receiver_list.handle(), signal_id_add));
+
+    // Verify destination buffers were NOT modified (immediate-only operation)
+    sender_list.dst_pattern_check(mem_list_index - 1, mem_list::SEED_DST);
+    sender_list.dst_pattern_check(mem_list_index, mem_list::SEED_DST);
+    sender_list.dst_pattern_check(mem_list_index + 1, mem_list::SEED_DST);
+}
+
+UCS_TEST_P(test_ucp_device_xfer, put_multi_with_imm)
+{
+    static constexpr size_t size = 32 * UCS_KBYTE;
+    static constexpr unsigned buffer_count = 4;
+    
+    // Create sender and receiver mem_lists
+    // Need buffer_count + 1 with MODE_LAST_ELEM_COUNTER because the last element
+    // is used as scratchpad for the immediate data signal
+    mem_list sender_list(*this, size, buffer_count + 1, UCS_MEMORY_TYPE_CUDA,
+                         mem_list::MODE_LAST_ELEM_COUNTER);
+    mem_list receiver_list(*this, size, 1, UCS_MEMORY_TYPE_CUDA,
+                           mem_list::MODE_DATA_ONLY, true /* use_receiver_ep */);
+
+    // Initialize the counter element (last element used as scratchpad)
+    const unsigned counter_index = buffer_count;
+    sender_list.dst_counter_init(counter_index);
+
+    // Calculate expected multiplier for multi-thread/warp operations
+    const size_t multiplier = get_num_ops_multiplier();
+
+    // Test ADD operation with data transfer
+    static constexpr unsigned signal_id_add  = 7;
+    static constexpr uint32_t signal_val_add = 100;
+
+    auto params = init_params();
+    // Don't override num_threads - let it match the device level for proper cooperation
+    params.num_iters                   = 1; // Only send once
+    params.operation                   = TEST_UCP_DEVICE_KERNEL_PUT_MULTI_WITH_IMM;
+    params.mem_list                    = sender_list.handle();
+    params.multi_with_imm.imm_data     = make_imm_add(signal_id_add, signal_val_add);
+    launch_kernel(params);
+
+    // Poll receiver's RX CQ from device code to process immediate data
+    params.operation            = TEST_UCP_DEVICE_KERNEL_POLL_RX_CQ;
+    params.mem_list             = receiver_list.handle();
+    params.poll_rx_cq.num_polls = 100;
+    launch_kernel(params);
+
+    // Verify data transfer: All buffers should have SEED_SRC pattern
+    for (unsigned i = 0; i < buffer_count; ++i) {
+        sender_list.dst_pattern_check(i, mem_list::SEED_SRC);
+    }
+
+    // Verify ADD operation: signal value should be incremented
+    // With multiple threads/warps, the value accumulates
+    const uint64_t expected_add_value = signal_val_add * params.num_iters * multiplier;
+    EXPECT_EQ(expected_add_value, read_signal(receiver_list.handle(), signal_id_add,
+                                              expected_add_value, true));
+
+    // Test SET operation with data transfer
+    static constexpr unsigned signal_id_set  = 9;
+    static constexpr uint32_t signal_val_set = 0xABCDE;
+
+    params = init_params();
+    // Don't override num_threads - let it match the device level for proper cooperation
+    params.num_iters                   = 1; // Only send once
+    params.operation                   = TEST_UCP_DEVICE_KERNEL_PUT_MULTI_WITH_IMM;
+    params.mem_list                    = sender_list.handle();
+    params.multi_with_imm.imm_data     = make_imm_set(signal_id_set, signal_val_set);
+    launch_kernel(params);
+
+    // Poll receiver's RX CQ from device code to process immediate data
+    params.operation            = TEST_UCP_DEVICE_KERNEL_POLL_RX_CQ;
+    params.mem_list             = receiver_list.handle();
+    params.poll_rx_cq.num_polls = 100;
+    launch_kernel(params);
+
+    // Verify data transfer: All buffers should still have SEED_SRC pattern
+    for (unsigned i = 0; i < buffer_count; ++i) {
+        sender_list.dst_pattern_check(i, mem_list::SEED_SRC);
+    }
+
+    // Verify SET operation: signal value should be set
+    // All threads write the same value, so result is deterministic despite races
+    EXPECT_EQ(signal_val_set, read_signal(receiver_list.handle(), signal_id_set,
+                                          signal_val_set, true));
+
+    // Verify signal independence: ADD signal should still have its value
+    EXPECT_EQ(expected_add_value, read_signal(receiver_list.handle(), signal_id_add));
 }
 
 /* TODO: Enable these tests in CI */
