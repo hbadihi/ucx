@@ -286,6 +286,17 @@ ucp_perf_cuda_send_async(const ucp_perf_cuda_params &params,
         return ucp_device_put_multi_with_imm<level>(params.mem_list, 
                                                      imm_data, flags, req);
     }
+    case UCX_PERF_CMD_PUT_MULTI_WITH_IMM_BW: {
+        // Similar to PUT_WITH_IMM but using put_multi function
+        // Layout (MSB -> LSB): | Signal ID (10b) | Signal Value (20b) | Signal OP (1b) | Processed (1b) |
+        uint32_t signal_id = 0;
+        uint32_t signal_value = 1;
+        uint32_t imm_data = ((signal_id) << 22) | 
+                            ((signal_value) << 2) | 
+                            (UCT_RC_GDAKI_SIGNAL_OP_ADD << 1) | 0;
+        return ucp_device_put_multi_with_imm<level>(params.mem_list, 
+                                                     imm_data, flags, req);
+    }
     case UCX_PERF_CMD_PUT_PARTIAL: {
         unsigned counter_index = params.mem_list->mem_list_length - 1;
         return ucp_device_put_multi_partial<level>(params.mem_list,
@@ -507,11 +518,21 @@ ucp_perf_cuda_wait_bw_kernel(ucx_perf_cuda_context &ctx,
 {
     volatile uint64_t *sn = params.counter_recv;
     while (*sn < ctx.max_iters) {
-        printf("sn: %d\n", *sn);
-        printf("max_iters: %d\n", ctx.max_iters);
         __nanosleep(100000); // 100us
     }
 
+    ctx.status = UCS_OK;
+}
+
+__global__ void
+ucp_perf_cuda_wait_bw_kernel_with_imm(ucx_perf_cuda_context &ctx,
+                             ucp_perf_cuda_params params, uct_rc_gdaki_dev_ep_t *ep)
+{
+    volatile uint32_t *sn = &ep->signals[0];    
+    while (*sn < (uint32_t)ctx.max_iters) {
+        uct_rc_mlx5_gda_poll_recv_cq<UCS_DEVICE_LEVEL_THREAD>(ep);
+    }
+    ep->signals[0] = 0;
     ctx.status = UCS_OK;
 }
 
@@ -568,8 +589,15 @@ public:
             CUDA_CALL_RET(UCS_ERR_NO_DEVICE, cudaGetLastError);
             wait_for_kernel();
         } else if (my_index == 0) {
-            ucp_perf_cuda_wait_bw_kernel<<<1, 1>>>(
+            uct_device_ep_t *device_ep = params_handler.get_params().mem_list->uct_device_eps[0];
+            auto ep = reinterpret_cast<uct_rc_gdaki_dev_ep_t*>(device_ep);
+            if (m_perf.params.command == UCX_PERF_CMD_PUT_MULTI_WITH_IMM_BW) {
+                ucp_perf_cuda_wait_bw_kernel_with_imm<<<1, 1>>>(
+                    *m_gpu_ctx, params_handler.get_params(), ep);
+            } else {
+                ucp_perf_cuda_wait_bw_kernel<<<1, 1>>>(
                     *m_gpu_ctx, params_handler.get_params());
+            }
         }
 
         CUDA_CALL_RET(UCS_ERR_IO_ERROR, cudaDeviceSynchronize);
