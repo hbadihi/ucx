@@ -12,11 +12,15 @@
 
 typedef enum {
     TEST_UCP_DEVICE_KERNEL_PUT_SINGLE,
+    TEST_UCP_DEVICE_KERNEL_PUT_SINGLE_WITH_IMM,
     TEST_UCP_DEVICE_KERNEL_PUT_MULTI,
+    TEST_UCP_DEVICE_KERNEL_PUT_MULTI_WITH_IMM,
     TEST_UCP_DEVICE_KERNEL_PUT_MULTI_PARTIAL,
     TEST_UCP_DEVICE_KERNEL_COUNTER_INC,
     TEST_UCP_DEVICE_KERNEL_COUNTER_WRITE,
-    TEST_UCP_DEVICE_KERNEL_COUNTER_READ
+    TEST_UCP_DEVICE_KERNEL_COUNTER_READ,
+    TEST_UCP_DEVICE_KERNEL_SIGNAL_READ,
+    TEST_UCP_DEVICE_KERNEL_POLL_RX_CQ
 } test_ucp_device_operation_t;
 
 typedef struct {
@@ -36,6 +40,13 @@ typedef struct {
             size_t     length;
         } single;
         struct {
+            unsigned   mem_list_index;
+            const void *address;
+            uint64_t   remote_address;
+            size_t     length;
+            uint64_t   imm_data;
+        } single_with_imm;
+        struct {
             unsigned mem_list_index;
             uint64_t inc_value;
             uint64_t remote_address;
@@ -47,6 +58,9 @@ typedef struct {
             uint64_t       counter_inc_value;
             uint64_t       counter_remote_address;
         } multi;
+        struct {
+            uint64_t imm_data;
+        } multi_with_imm;
         struct {
             const unsigned *mem_list_indices;
             unsigned       mem_list_count;
@@ -61,6 +75,13 @@ typedef struct {
             void     *address;
             uint64_t value;
         } local_counter;
+        struct {
+            unsigned signal_id;
+            uint64_t *signal_value;
+        } signal_read;
+        struct {
+            unsigned num_polls;
+        } poll_rx_cq;
     };
 } test_ucp_device_kernel_params_t;
 
