@@ -119,6 +119,9 @@ test_type_t tests[] = {
     {"ucp_cswap", UCX_PERF_API_UCP, UCX_PERF_CMD_CSWAP, UCX_PERF_TEST_TYPE_STREAM_UNI,
      "atomic compare-and-swap latency / bandwidth / rate", "latency", 1},
 
+     {"ucp_put_multi_with_imm_bw", UCX_PERF_API_UCP, UCX_PERF_CMD_PUT_MULTI_WITH_IMM, UCX_PERF_TEST_TYPE_STREAM_UNI,
+        "put multi with immediate bandwidth", "overhead", 32},
+
     {"stream_bw", UCX_PERF_API_UCP, UCX_PERF_CMD_STREAM, UCX_PERF_TEST_TYPE_STREAM_UNI,
      "stream bandwidth", "overhead", 1},
 
