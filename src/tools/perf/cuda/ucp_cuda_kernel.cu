@@ -142,7 +142,8 @@ private:
     static bool has_counter(const ucx_perf_context_t &perf)
     {
         return (perf.params.command != UCX_PERF_CMD_PUT_SINGLE) &&
-               (perf.params.command != UCX_PERF_CMD_PUT_WITH_IMM);
+               (perf.params.command != UCX_PERF_CMD_PUT_WITH_IMM) &&
+               (perf.params.command != UCX_PERF_CMD_PUT_MULTI_WITH_IMM);
     }
 
     void init_mem_list(const ucx_perf_context_t &perf)
@@ -325,6 +326,12 @@ ucp_perf_cuda_send_async(const ucp_perf_cuda_params &params,
     }
     case UCX_PERF_CMD_PUT_MULTI:
         return ucp_device_put_multi<level>(params.mem_list, 1, 0, flags, req);
+    case UCX_PERF_CMD_PUT_MULTI_WITH_IMM: {
+        uint32_t counter_signal_id = 0;
+        uint32_t increment_by = 1;
+        uint32_t imm_data = ((counter_signal_id << 22) | (increment_by << 2) | (UCT_RC_GDAKI_SIGNAL_OP_ADD << 1) | 0);
+        return ucp_device_put_multi_with_imm<level>(params.mem_list, imm_data, flags, req);
+    }
     case UCX_PERF_CMD_PUT_PARTIAL: {
         unsigned counter_index = params.mem_list->mem_list_length - 1;
         return ucp_device_put_multi_partial<level>(params.mem_list,
@@ -519,7 +526,8 @@ public:
 
         UCX_PERF_KERNEL_DISPATCH(m_perf, ucp_perf_cuda_put_latency_kernel,
                                     *m_gpu_ctx, params_handler.get_params(),
-                                    my_index, m_perf.params.command == UCX_PERF_CMD_PUT_WITH_IMM);
+                                    my_index, (m_perf.params.command == UCX_PERF_CMD_PUT_WITH_IMM) ||
+                                              (m_perf.params.command == UCX_PERF_CMD_PUT_MULTI_WITH_IMM));
         CUDA_CALL_RET(UCS_ERR_NO_DEVICE, cudaGetLastError);
 
         wait_for_kernel();
