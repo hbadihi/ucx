@@ -274,6 +274,7 @@ ucp_perf_cuda_send_async(const ucp_perf_cuda_params &params,
                                                      imm_data, 0, flags, req);
     }
     case UCX_PERF_CMD_PUT_MULTI:
+        *params.counter_send = idx + 1;
         return ucp_device_put_multi<level>(params.mem_list, 1, 0, flags, req);
     case UCX_PERF_CMD_PUT_MULTI_WITH_IMM: {
         // Similar to PUT_WITH_IMM but using put_multi function
@@ -281,6 +282,7 @@ ucp_perf_cuda_send_async(const ucp_perf_cuda_params &params,
         uint32_t imm_data = ((idx % UCT_RC_GDAKI_SIGNALS_NUM) << 22) | 
                             ((idx + 1) << 2) | 
                             (UCT_RC_GDAKI_SIGNAL_OP_SET << 1) | 0;
+        *params.counter_send = idx + 1;
         return ucp_device_put_multi_with_imm<level>(params.mem_list, 
                                                      imm_data, flags, req);
     }
