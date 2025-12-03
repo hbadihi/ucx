@@ -371,6 +371,7 @@ ucp_perf_cuda_put_bw_kernel_impl(ucx_perf_cuda_context &ctx,
     }
 
     while (req_mgr.get_pending_count() > 0) {
+        printf("pending count: %d\n", req_mgr.get_pending_count());
         uint8_t index;
         status = req_mgr.progress_one<level, fc, 0>(index);
         if (UCS_STATUS_IS_ERR(status)) {
@@ -506,6 +507,8 @@ ucp_perf_cuda_wait_bw_kernel(ucx_perf_cuda_context &ctx,
 {
     volatile uint64_t *sn = params.counter_recv;
     while (*sn < ctx.max_iters) {
+        printf("sn: %d\n", *sn);
+        printf("max_iters: %d\n", ctx.max_iters);
         __nanosleep(100000); // 100us
     }
 
