@@ -468,17 +468,30 @@ ucp_perf_cuda_put_latency_kernel(ucx_perf_cuda_context &ctx,
     ucx_perf_cuda_counter counter(params, is_with_imm);
     ucx_perf_cuda_reporter reporter(ctx);
 
+    // Timing counters
+    unsigned long long sender_send_time = 0, sender_wait_time = 0;
+    unsigned long long receiver_wait_time = 0, receiver_send_time = 0;
+    unsigned long long start_time;
+
     for (ucx_perf_counter_t idx = 0; idx < max_iters; idx++) {
         if (is_sender) {
+            start_time = clock64();
             status = ucp_perf_cuda_send_sync<level, cmd>(params, idx, req);
+            sender_send_time += clock64() - start_time;
             if (status != UCS_OK) {
                 ucs_device_error("sender send failed: %d", status);
                 break;
             }
+            start_time = clock64();
             counter.wait(idx + 1);
+            sender_wait_time += clock64() - start_time;
         } else {
+            start_time = clock64();
             counter.wait(idx + 1);
+            receiver_wait_time += clock64() - start_time;
+            start_time = clock64();
             status = ucp_perf_cuda_send_sync<level, cmd>(params, idx, req);
+            receiver_send_time += clock64() - start_time;
             if (status != UCS_OK) {
                 ucs_device_error("receiver send failed: %d", status);
                 break;
@@ -486,6 +499,15 @@ ucp_perf_cuda_put_latency_kernel(ucx_perf_cuda_context &ctx,
         }
 
         reporter.update_report(idx + 1);
+    }
+
+    // Print averages
+    if (is_sender && max_iters > 0) {
+        printf("Sender avg send_sync: %llu cycles, avg wait: %llu cycles\n",
+               sender_send_time / max_iters, sender_wait_time / max_iters);
+    } else if (!is_sender && max_iters > 0) {
+        printf("Receiver avg wait: %llu cycles, avg send_sync: %llu cycles\n",
+               receiver_wait_time / max_iters, receiver_send_time / max_iters);
     }
 
     counter.reset();
