@@ -142,9 +142,7 @@ private:
     static bool has_counter(const ucx_perf_context_t &perf)
     {
         return (perf.params.command != UCX_PERF_CMD_PUT_SINGLE) &&
-               (perf.params.command != UCX_PERF_CMD_PUT_WITH_IMM) &&
-               (perf.params.command != UCX_PERF_CMD_PUT_MULTI_WITH_IMM);
-    }
+               (perf.params.command != UCX_PERF_CMD_PUT_WITH_IMM);    }
 
     void init_mem_list(const ucx_perf_context_t &perf)
     {
