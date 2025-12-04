@@ -751,14 +751,14 @@ template<ucs_device_level_t level>
 UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_put_with_imm(
         uct_device_ep_h tl_ep, const uct_device_mem_element_t *tl_mem_elem,
         uint64_t imm_data, uint64_t remote_address, uint64_t flags,
-        uct_device_completion_t *comp, const void *address)
+        uct_device_completion_t *comp)
 {
     auto ep       = reinterpret_cast<uct_rc_gdaki_dev_ep_t*>(tl_ep);
     auto mem_elem = reinterpret_cast<const uct_rc_gdaki_device_mem_element_t*>(
             tl_mem_elem);
 
-    return uct_rc_mlx5_gda_ep_single<level>(ep, tl_mem_elem, address, mem_elem->lkey, remote_address,
-                                            mem_elem->rkey, 1,
+    return uct_rc_mlx5_gda_ep_single<level>(ep, tl_mem_elem, nullptr, mem_elem->lkey, remote_address,
+                                            mem_elem->rkey, 0,
                                             flags, comp, MLX5_OPCODE_RDMA_WRITE_IMM,
                                             false, 0, true, imm_data);
     

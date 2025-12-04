@@ -30,9 +30,8 @@ ucp_test_kernel_do_operation(const test_ucp_device_kernel_params_t &params,
         break;
     case TEST_UCP_DEVICE_KERNEL_PUT_SINGLE_WITH_IMM:
         status = ucp_device_put_single_with_imm<level>(
-                params.mem_list, params.single_with_imm.mem_list_index, 0, 0,
-                params.single_with_imm.length, params.single_with_imm.imm_data,
-                0, flags, req_ptr);
+                params.mem_list, params.single_with_imm.mem_list_index, params.single_with_imm.imm_data,
+                flags, req_ptr);
         break;
     case TEST_UCP_DEVICE_KERNEL_PUT_MULTI:
         status = ucp_device_put_multi<level>(params.mem_list,
