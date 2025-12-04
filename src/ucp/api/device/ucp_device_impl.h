@@ -208,14 +208,10 @@ UCS_F_DEVICE ucs_status_t ucp_device_put_single(
 template<ucs_device_level_t level = UCS_DEVICE_LEVEL_THREAD>
 UCS_F_DEVICE ucs_status_t ucp_device_put_single_with_imm(
         ucp_device_mem_list_handle_h mem_list_h, unsigned mem_list_index,
-        size_t local_offset, size_t remote_offset, size_t length,
-        uint64_t imm_data, unsigned channel_id, uint64_t flags,
+        uint64_t imm_data,uint64_t flags,
         ucp_device_request_t *req)
 {
-    const void *address           = UCS_PTR_BYTE_OFFSET(
-            mem_list_h->local_addrs[mem_list_index], local_offset);
-    const uint64_t remote_address = mem_list_h->remote_addrs[mem_list_index] +
-                                    remote_offset;
+    const uint64_t remote_address = mem_list_h->remote_addrs[mem_list_index];
     const uct_device_mem_element_t *uct_elem;
     uct_device_completion_t *comp;
     uct_device_ep_t *device_ep;
@@ -228,8 +224,8 @@ UCS_F_DEVICE ucs_status_t ucp_device_put_single_with_imm(
     }
 
     return UCP_DEVICE_SEND_BLOCKING(level, uct_device_ep_put_single_with_imm,
-                                    device_ep, req, uct_elem, address,
-                                    remote_address, length, imm_data, flags,
+                                    device_ep, req, uct_elem,
+                                    remote_address, imm_data, flags,
                                     comp);
 }
 
