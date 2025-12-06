@@ -266,7 +266,7 @@ template<ucs_device_level_t level = UCS_DEVICE_LEVEL_THREAD>
 UCS_F_DEVICE ucs_status_t ucp_device_counter_inc(
         ucp_device_mem_list_handle_h mem_list_h, unsigned mem_list_index,
         uint64_t inc_value, size_t remote_offset, unsigned channel_id,
-        uint64_t flags, ucp_device_request_t *req)
+        uint64_t flags, ucp_device_request_t *req, bool is_with_imm=false)
 {
     uint64_t remote_address = mem_list_h->remote_addrs[mem_list_index] +
                               remote_offset;
@@ -281,9 +281,17 @@ UCS_F_DEVICE ucs_status_t ucp_device_counter_inc(
         return status;
     }
 
-    return UCP_DEVICE_SEND_BLOCKING(level, uct_device_ep_atomic_add, device_ep,
-                                    req, uct_elem, inc_value, remote_address,
-                                    flags, comp);
+    if (is_with_imm) {
+        uint32_t signal_id = 0;
+        uint64_t imm_data = (signal_id << 22 | (inc_value << 2) | (UCT_RC_GDAKI_SIGNAL_OP_ADD << 1) | 0);
+        return UCP_DEVICE_SEND_BLOCKING(level, uct_device_ep_put_with_imm, device_ep,
+                                        req, uct_elem, imm_data, remote_address,
+                                        flags, comp, nullptr);
+    } else {
+        return UCP_DEVICE_SEND_BLOCKING(level, uct_device_ep_atomic_add, device_ep,
+                                        req, uct_elem, inc_value, remote_address,
+                                        flags, comp);
+    }
 }
 
 
