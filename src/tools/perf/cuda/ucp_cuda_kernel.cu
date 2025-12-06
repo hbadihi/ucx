@@ -116,6 +116,7 @@ struct ucp_perf_cuda_params {
     size_t                       *lengths;
     uint64_t                     *counter_send;
     uint64_t                     *counter_recv;
+    uint32_t                     *signals;
 };
 
 class ucp_perf_cuda_params_handler {
@@ -134,6 +135,7 @@ public:
         CUDA_CALL_WARN(cudaFree, m_params.local_offsets);
         CUDA_CALL_WARN(cudaFree, m_params.remote_offsets);
         CUDA_CALL_WARN(cudaFree, m_params.lengths);
+        CUDA_CALL_WARN(cudaFree, m_params.signals);
     }
 
     const ucp_perf_cuda_params &get_params() const { return m_params; }
@@ -233,6 +235,12 @@ private:
                                                      m_params.length);
         m_params.counter_recv = ucx_perf_cuda_get_sn(perf.recv_buffer,
                                                      m_params.length);
+        
+        /* Allocate signals array on GPU */
+        CUDA_CALL(, UCS_LOG_LEVEL_FATAL, cudaMalloc, &m_params.signals,
+                  UCT_RC_GDAKI_SIGNALS_NUM * sizeof(uint32_t));
+        CUDA_CALL_ERR(cudaMemset, m_params.signals, 0,
+                      UCT_RC_GDAKI_SIGNALS_NUM * sizeof(uint32_t));
     }
 
     template<typename T>
@@ -252,7 +260,7 @@ UCS_F_DEVICE void ucx_perf_cuda_wait_sn_with_imm(uint32_t *sn, uint32_t value, u
 {
     if (threadIdx.x == 0) {
         while (ucs_device_atomic32_read(sn) < value) {
-            uct_rc_mlx5_gda_poll_recv_cq<UCS_DEVICE_LEVEL_THREAD>(ep);
+            uct_rc_mlx5_gda_poll_recv_cq<UCS_DEVICE_LEVEL_THREAD>(ep, sn);
         }
     }
     __syncthreads();
@@ -267,7 +275,7 @@ public:
         if (m_use_imm) {
             uct_device_ep_t *device_ep = params.mem_list->uct_device_eps[0];
             m_ep = reinterpret_cast<uct_rc_gdaki_dev_ep_t*>(device_ep);
-            m_imm_counter = &m_ep->signals[0];
+            m_imm_counter = params.signals;
         }
         m_regular_counter = params.counter_recv;
     }

@@ -78,9 +78,11 @@ typedef struct {
         struct {
             unsigned signal_id;
             uint64_t *signal_value;
+            uint32_t *signals;
         } signal_read;
         struct {
             unsigned num_polls;
+            uint32_t *signals;
         } poll_rx_cq;
     };
 } test_ucp_device_kernel_params_t;

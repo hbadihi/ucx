@@ -8,6 +8,7 @@
 #include <ucp/ucp_test.h>
 
 #include <ucp/api/device/ucp_device_types.h>
+#include <uct/ib/mlx5/gdaki/gdaki_dev.h>
 
 #include <common/cuda.h>
 #include "cuda/test_kernels.h"
@@ -582,7 +583,8 @@ protected:
      * Progresses the receiver to ensure CQEs with immediate data are processed.
      */
     uint64_t read_signal(ucp_device_mem_list_handle_h mem_list, unsigned signal_id,
-                        uint64_t expected_value = 0, bool wait_for_value = false)
+                        uint32_t *signals, uint64_t expected_value = 0, 
+                        bool wait_for_value = false)
     {
         mapped_buffer result_buffer(sizeof(uint64_t), receiver(), 0,
                                      UCS_MEMORY_TYPE_CUDA);
@@ -593,6 +595,7 @@ protected:
         params.signal_read.signal_id      = signal_id;
         params.signal_read.signal_value   = 
             reinterpret_cast<uint64_t*>(result_buffer.ptr());
+        params.signal_read.signals        = signals;
         
         if (wait_for_value) {
             /* Wait for the receiver to process the CQE with immediate data */
@@ -654,6 +657,13 @@ UCS_TEST_P(test_ucp_device_xfer, put_single_with_imm)
     mem_list receiver_list(*this, size, 1, UCS_MEMORY_TYPE_CUDA,
                            mem_list::MODE_DATA_ONLY, true /* use_receiver_ep */);
 
+    // Allocate signals array on GPU for receiver
+    uint32_t *signals_gpu;
+    ASSERT_EQ(cudaSuccess, cudaMalloc(&signals_gpu, 
+                                      UCT_RC_GDAKI_SIGNALS_NUM * sizeof(uint32_t)));
+    ASSERT_EQ(cudaSuccess, cudaMemset(signals_gpu, 0, 
+                                      UCT_RC_GDAKI_SIGNALS_NUM * sizeof(uint32_t)));
+
     // Test ADD operation with non-trivial immediate value
     // Note: put_single_with_imm sends only immediate data (0 bytes of payload)
     static constexpr unsigned mem_list_index = 3;
@@ -673,16 +683,17 @@ UCS_TEST_P(test_ucp_device_xfer, put_single_with_imm)
     launch_kernel(params);
 
     // Poll receiver's RX CQ from device code to process immediate data
-    // This is where ep->signals[signal_id] gets updated
-    params.operation          = TEST_UCP_DEVICE_KERNEL_POLL_RX_CQ;
-    params.mem_list           = receiver_list.handle();
+    // This is where signals[signal_id] gets updated
+    params.operation            = TEST_UCP_DEVICE_KERNEL_POLL_RX_CQ;
+    params.mem_list             = receiver_list.handle();
     params.poll_rx_cq.num_polls = 100;
+    params.poll_rx_cq.signals   = signals_gpu;
     launch_kernel(params);
 
     // Verify ADD operation: signal value should be incremented
-    // Read from receiver's endpoint signals
+    // Read from receiver's signals array
     EXPECT_EQ(signal_val_add, read_signal(receiver_list.handle(), signal_id_add,
-                                          signal_val_add, true));
+                                          signals_gpu, signal_val_add, true));
 
     // Test SET operation with non-trivial immediate value
     static constexpr unsigned signal_id_set  = 5;
@@ -703,19 +714,24 @@ UCS_TEST_P(test_ucp_device_xfer, put_single_with_imm)
     params.operation            = TEST_UCP_DEVICE_KERNEL_POLL_RX_CQ;
     params.mem_list             = receiver_list.handle();
     params.poll_rx_cq.num_polls = 100;
+    params.poll_rx_cq.signals   = signals_gpu;
     launch_kernel(params);
 
     // Verify SET operation: signal value should be set to the specified value
     EXPECT_EQ(signal_val_set, read_signal(receiver_list.handle(), signal_id_set,
-                                          signal_val_set, true));
+                                          signals_gpu, signal_val_set, true));
 
     // Verify other signal was not affected (ADD signal should still have its value)
-    EXPECT_EQ(signal_val_add, read_signal(receiver_list.handle(), signal_id_add));
+    EXPECT_EQ(signal_val_add, read_signal(receiver_list.handle(), signal_id_add,
+                                          signals_gpu));
 
     // Verify destination buffers were NOT modified (immediate-only operation)
     sender_list.dst_pattern_check(mem_list_index - 1, mem_list::SEED_DST);
     sender_list.dst_pattern_check(mem_list_index, mem_list::SEED_DST);
     sender_list.dst_pattern_check(mem_list_index + 1, mem_list::SEED_DST);
+
+    // Cleanup
+    cudaFree(signals_gpu);
 }
 
 UCS_TEST_P(test_ucp_device_xfer, put_multi_with_imm)
@@ -730,6 +746,13 @@ UCS_TEST_P(test_ucp_device_xfer, put_multi_with_imm)
                          mem_list::MODE_LAST_ELEM_COUNTER);
     mem_list receiver_list(*this, size, 1, UCS_MEMORY_TYPE_CUDA,
                            mem_list::MODE_DATA_ONLY, true /* use_receiver_ep */);
+
+    // Allocate signals array on GPU for receiver
+    uint32_t *signals_gpu;
+    ASSERT_EQ(cudaSuccess, cudaMalloc(&signals_gpu, 
+                                      UCT_RC_GDAKI_SIGNALS_NUM * sizeof(uint32_t)));
+    ASSERT_EQ(cudaSuccess, cudaMemset(signals_gpu, 0, 
+                                      UCT_RC_GDAKI_SIGNALS_NUM * sizeof(uint32_t)));
 
     // Initialize the counter element (last element used as scratchpad)
     const unsigned counter_index = buffer_count;
@@ -754,6 +777,7 @@ UCS_TEST_P(test_ucp_device_xfer, put_multi_with_imm)
     params.operation            = TEST_UCP_DEVICE_KERNEL_POLL_RX_CQ;
     params.mem_list             = receiver_list.handle();
     params.poll_rx_cq.num_polls = 100;
+    params.poll_rx_cq.signals   = signals_gpu;
     launch_kernel(params);
 
     // Verify data transfer: All buffers should have SEED_SRC pattern
@@ -765,7 +789,7 @@ UCS_TEST_P(test_ucp_device_xfer, put_multi_with_imm)
     // With multiple threads/warps, the value accumulates
     const uint64_t expected_add_value = signal_val_add * params.num_iters * multiplier;
     EXPECT_EQ(expected_add_value, read_signal(receiver_list.handle(), signal_id_add,
-                                              expected_add_value, true));
+                                              signals_gpu, expected_add_value, true));
 
     // Test SET operation with data transfer
     static constexpr unsigned signal_id_set  = 9;
@@ -783,6 +807,7 @@ UCS_TEST_P(test_ucp_device_xfer, put_multi_with_imm)
     params.operation            = TEST_UCP_DEVICE_KERNEL_POLL_RX_CQ;
     params.mem_list             = receiver_list.handle();
     params.poll_rx_cq.num_polls = 100;
+    params.poll_rx_cq.signals   = signals_gpu;
     launch_kernel(params);
 
     // Verify data transfer: All buffers should still have SEED_SRC pattern
@@ -793,10 +818,14 @@ UCS_TEST_P(test_ucp_device_xfer, put_multi_with_imm)
     // Verify SET operation: signal value should be set
     // All threads write the same value, so result is deterministic despite races
     EXPECT_EQ(signal_val_set, read_signal(receiver_list.handle(), signal_id_set,
-                                          signal_val_set, true));
+                                          signals_gpu, signal_val_set, true));
 
     // Verify signal independence: ADD signal should still have its value
-    EXPECT_EQ(expected_add_value, read_signal(receiver_list.handle(), signal_id_add));
+    EXPECT_EQ(expected_add_value, read_signal(receiver_list.handle(), signal_id_add,
+                                              signals_gpu));
+
+    // Cleanup
+    cudaFree(signals_gpu);
 }
 
 /* TODO: Enable these tests in CI */
