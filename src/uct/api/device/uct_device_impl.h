@@ -399,11 +399,11 @@ UCS_F_DEVICE ucs_status_t uct_device_ep_check_completion(
          uint64_t imm_data, uint64_t remote_address, uint64_t flags,
          uct_device_completion_t *comp, const void *address)
  {
-     if (device_ep->uct_tl_id == UCT_DEVICE_TL_RC_MLX5_GDA) {
-         return uct_rc_mlx5_gda_ep_put_with_imm<level>(device_ep, mem_elem,
-                                                     imm_data, remote_address,
-                                                     flags, comp, address);
-     }
+    if (device_ep->uct_tl_id == UCT_DEVICE_TL_RC_MLX5_GDA) {
+        return uct_rc_mlx5_gda_ep_put_with_imm<level>(device_ep, mem_elem,
+                                                    imm_data, remote_address,
+                                                    flags, comp);
+    }
      return UCS_ERR_UNSUPPORTED;
  }
 
