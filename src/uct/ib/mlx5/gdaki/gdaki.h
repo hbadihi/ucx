@@ -42,7 +42,6 @@ typedef struct uct_rc_gdaki_ep {
     struct mlx5dv_devx_umem      *umem;
     CUdeviceptr                  ep_raw;
     uct_rc_gdaki_dev_ep_t        *ep_gpu;
-    CUdeviceptr                  signals;
     void                         *sq_db;
     uint8_t                      dev_ep_init;
 } uct_rc_gdaki_ep_t;

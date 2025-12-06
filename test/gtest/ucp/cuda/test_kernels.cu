@@ -72,11 +72,8 @@ ucp_test_kernel_do_operation(const test_ucp_device_kernel_params_t &params,
         return UCS_OK;
     }
     case TEST_UCP_DEVICE_KERNEL_SIGNAL_READ: {
-        /* Access the UCT endpoint from the mem_list handle */
-        auto uct_ep = reinterpret_cast<uct_rc_gdaki_dev_ep_t*>(
-                params.mem_list->uct_device_eps[0]);
-        /* Read the signal value from the endpoint's signals array */
-        *params.signal_read.signal_value = uct_ep->signals[params.signal_read.signal_id];
+        /* Read the signal value from the provided signals array */
+        *params.signal_read.signal_value = params.signal_read.signals[params.signal_read.signal_id];
         /* req_ptr is not used in this case */
         return UCS_OK;
     }
@@ -87,7 +84,7 @@ ucp_test_kernel_do_operation(const test_ucp_device_kernel_params_t &params,
         /* Poll RX CQ multiple times to ensure immediate data is processed */
         /* Sleep between polls to give time for CQEs to arrive (totals ~1 second) */
         for (unsigned i = 0; i < params.poll_rx_cq.num_polls; ++i) {
-            uct_rc_mlx5_gda_poll_recv_cq<level>(uct_ep);
+            uct_rc_mlx5_gda_poll_recv_cq<level>(uct_ep, params.poll_rx_cq.signals);
             __nanosleep(10000000); // 10ms sleep, 100 polls = 1 second total
         }
         /* req_ptr is not used in this case */

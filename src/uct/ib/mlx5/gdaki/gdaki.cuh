@@ -765,7 +765,7 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_put_with_imm(
 }
 
 template<ucs_device_level_t level>
-UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep)
+UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep, uint32_t *signal_ptr)
 {
     // 1. Calculate CQE pointer
     uint8_t *cqe_base = (uint8_t *)__ldg((uintptr_t *)&ep->rx_cqe_daddr);
@@ -801,12 +801,11 @@ UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep)
         signal_op  = (received_imm >> 1)  & 0x1;
         signal_val = (received_imm >> 2)  & 0xFFFFF;
         signal_id  = (received_imm >> 22) & 0x3FF;
-        uint32_t *signal_ptr = (uint32_t *)&ep->signals[signal_id];
         
         if (signal_op == UCT_RC_GDAKI_SIGNAL_OP_ADD) {
-            *signal_ptr += signal_val;
+            signal_ptr[signal_id] += signal_val;
         } else {
-            *signal_ptr = signal_val;
+            signal_ptr[signal_id] = signal_val;
         }
         /* SRQ DBR UPDATE for WQE */
         // To replenish the SRQ (allow NIC to reuse the WQE we just consumed),
