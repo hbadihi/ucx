@@ -598,4 +598,15 @@ UCS_F_DEVICE ucs_status_t ucp_device_progress_req(ucp_device_request_t *req)
                                      req, uct_elem, imm_data, remote_address,
                                      flags, comp, address);
  }
+
+ template<ucs_device_level_t level = UCS_DEVICE_LEVEL_THREAD>
+ UCS_F_DEVICE ucs_status_t ucp_device_counter_wait(ucp_device_mem_list_handle_h mem_list_h, uint64_t* signal_ptr)
+ {
+    uct_rc_gdaki_dev_ep_t *ep = reinterpret_cast<uct_rc_gdaki_dev_ep_t*>(mem_list_h->uct_device_eps[0]);
+    bool is_ready = false;
+    while (!is_ready) {
+        is_ready = uct_rc_mlx5_gda_poll_recv_cq<level>(ep, signal_ptr) == 0;
+    }
+    return UCS_OK;
+ }
 #endif /* UCP_DEVICE_IMPL_H */
