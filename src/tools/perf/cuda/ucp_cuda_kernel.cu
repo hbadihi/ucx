@@ -264,7 +264,6 @@ UCS_F_DEVICE void ucx_perf_cuda_wait_sn_with_imm(uint32_t *sn, uint32_t value, u
             uct_rc_mlx5_gda_poll_recv_cq<UCS_DEVICE_LEVEL_THREAD>(ep, sn);
         }
     }
-    __syncthreads();
 }
 
 class ucx_perf_cuda_counter {
@@ -476,22 +475,38 @@ ucp_perf_cuda_put_latency_kernel(ucx_perf_cuda_context &ctx,
 
     for (ucx_perf_counter_t idx = 0; idx < max_iters; idx++) {
         if (is_sender) {
-            status = ucp_perf_cuda_send_sync<level, cmd>(params, idx, req);
-            if (status != UCS_OK) {
+            status = ucp_perf_cuda_send_async<level, cmd>(params, idx, req);
+            if (UCS_STATUS_IS_ERR(status)) {
                 ucs_device_error("sender send failed: %d", status);
                 break;
             }
+            
+            // Wait for receiver's response (recv CQE only)
             counter.wait(idx + 1);
         } else {
+            // Wait for sender's request (recv CQE only)
             counter.wait(idx + 1);
-            status = ucp_perf_cuda_send_sync<level, cmd>(params, idx, req);
-            if (status != UCS_OK) {
+            
+            status = ucp_perf_cuda_send_async<level, cmd>(params, idx, req);
+            if (UCS_STATUS_IS_ERR(status)) {
                 ucs_device_error("receiver send failed: %d", status);
                 break;
             }
         }
 
         reporter.update_report(idx + 1);
+    }
+
+    // Wait for final send completion after timing loop ends
+    // This ensures all operations complete without affecting ping-pong latency measurement
+    if (req != nullptr) {
+        do {
+            status = ucp_device_progress_req<level>(req);
+        } while (status == UCS_INPROGRESS);
+        
+        if (UCS_STATUS_IS_ERR(status)) {
+            ucs_device_error("final send completion failed: %d", status);
+        }
     }
 
     counter.reset();
