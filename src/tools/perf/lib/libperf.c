@@ -486,6 +486,7 @@ static ucs_status_t uct_perf_test_check_capabilities(ucx_perf_params_t *params,
     case UCX_PERF_CMD_PUT_MULTI_WITH_IMM:
     case UCX_PERF_CMD_PUT_MULTI:
     case UCX_PERF_CMD_PUT_PARTIAL:
+    case UCX_PERF_CMD_SIGNAL:
         min_size = 0;
         max_size = 0;
         max_iov  = 0;
@@ -901,6 +902,7 @@ static ucs_status_t ucp_perf_test_fill_params(ucx_perf_params_t *params,
     case UCX_PERF_CMD_FADD:
     case UCX_PERF_CMD_SWAP:
     case UCX_PERF_CMD_CSWAP:
+    case UCX_PERF_CMD_SIGNAL:
         if (message_size == sizeof(uint32_t)) {
             ucp_params->features |= UCP_FEATURE_AMO32;
         } else if (message_size == sizeof(uint64_t)) {

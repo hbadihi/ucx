@@ -283,6 +283,7 @@ ucs_status_t uct_perf_test_alloc_mem(ucx_perf_context_t *perf)
     case UCX_PERF_CMD_FADD:
     case UCX_PERF_CMD_SWAP:
     case UCX_PERF_CMD_CSWAP:
+    case UCX_PERF_CMD_SIGNAL:
         flags |= UCT_MD_MEM_ACCESS_REMOTE_ATOMIC;
         break;
     default:

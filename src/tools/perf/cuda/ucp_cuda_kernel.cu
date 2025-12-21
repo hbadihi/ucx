@@ -348,6 +348,11 @@ ucp_perf_cuda_send_async(const ucp_perf_cuda_params &params,
                                                    counter_index, 1, 0, 0,
                                                    flags, req);
         }
+    case UCX_PERF_CMD_SIGNAL: {
+        unsigned counter_index = params.mem_list->mem_list_length - 1;
+        return ucp_device_counter_inc<level>(params.mem_list, counter_index,
+                                            1, 0, 0, flags, req, false);
+    }
     }
 
     return UCS_ERR_INVALID_PARAM;

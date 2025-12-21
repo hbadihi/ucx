@@ -98,6 +98,9 @@ test_type_t tests[] = {
      {"ucp_put_multi_with_imm_lat", UCX_PERF_API_UCP, UCX_PERF_CMD_PUT_MULTI_WITH_IMM, UCX_PERF_TEST_TYPE_PINGPONG,
      "put multi with immediate latency", "latency", 1},
 
+    {"ucp_signal_lat", UCX_PERF_API_UCP, UCX_PERF_CMD_SIGNAL, UCX_PERF_TEST_TYPE_PINGPONG,
+     "signal latency", "latency", 1},
+
     {"ucp_put_partial_bw", UCX_PERF_API_UCP, UCX_PERF_CMD_PUT_PARTIAL, UCX_PERF_TEST_TYPE_STREAM_UNI,
      "put partial bandwidth", "overhead", 32},
 

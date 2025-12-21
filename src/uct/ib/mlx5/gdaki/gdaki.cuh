@@ -388,7 +388,7 @@ UCS_F_DEVICE ucs_status_t uct_rc_mlx5_gda_ep_single(
                 reinterpret_cast<uint64_t>(address), lkey, length, is_atomic,
                 add);
         }
-    }
+    } 
 
     uct_rc_mlx5_gda_sync<level>();
 
