@@ -353,6 +353,11 @@ ucp_perf_cuda_send_async(const ucp_perf_cuda_params &params,
         return ucp_device_counter_inc<level>(params.mem_list, counter_index,
                                             1, 0, 0, flags, req, false);
     }
+    case UCX_PERF_CMD_SIGNAL_WITH_IMM: {
+        unsigned counter_index = params.mem_list->mem_list_length - 1;
+        return ucp_device_counter_inc<level>(params.mem_list, counter_index,
+                                            1, 0, 0, flags, req, true);
+    }
     }
 
     return UCS_ERR_INVALID_PARAM;
@@ -552,7 +557,8 @@ public:
         UCX_PERF_KERNEL_DISPATCH(m_perf, ucp_perf_cuda_put_latency_kernel,
                                     *m_gpu_ctx, params_handler.get_params(),
                                     my_index, (m_perf.params.command == UCX_PERF_CMD_PUT_WITH_IMM) ||
-                                              (m_perf.params.command == UCX_PERF_CMD_PUT_MULTI_WITH_IMM));
+                                              (m_perf.params.command == UCX_PERF_CMD_PUT_MULTI_WITH_IMM) ||
+                                              (m_perf.params.command == UCX_PERF_CMD_SIGNAL_WITH_IMM));
         CUDA_CALL_RET(UCS_ERR_NO_DEVICE, cudaGetLastError);
 
         wait_for_kernel();
