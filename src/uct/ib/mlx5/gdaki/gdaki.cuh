@@ -768,72 +768,53 @@ template<ucs_device_level_t level>
 UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep, uint32_t *signal_ptr)
 {
     // 1. Calculate CQE pointer
-    uint8_t *cqe_base = (uint8_t *)__ldg((uintptr_t *)&ep->rx_cqe_daddr);
+    uint8_t *cqe = (uint8_t *)__ldg((uintptr_t *)&ep->rx_cqe_daddr);
     const uint32_t cqe_num = __ldg(&ep->rx_cqe_num);
-    uint32_t cqe_ci = ep->rx_cq_ci;
-    uint32_t idx = cqe_ci & (cqe_num - 1);
-    struct mlx5_cqe64 *cqe = (struct mlx5_cqe64 *)(cqe_base + (idx * sizeof(struct mlx5_cqe64)));
+    uint32_t cons_index = __nv_atomic_fetch_add(&ep->rx_cq_ci, 1, __NV_ATOMIC_RELAXED, __NV_THREAD_SCOPE_DEVICE);
+    uint32_t idx = cons_index & (cqe_num - 1);
+    struct mlx5_cqe64 *cqe64 = (struct mlx5_cqe64 *)(cqe + (idx * sizeof(struct mlx5_cqe64)));
 
-    uint32_t *imm_ptr = (uint32_t *)&cqe->imm_inval_pkey;
+    bool is_ready = false;
+    uint8_t sig_op;
+    uint16_t sig_id;
+    uint32_t sig_val;
+    uint32_t imm_val;
+    uint32_t be_mask = 0x80000000;
+    do
+    {
+        imm_val = __nv_atomic_fetch_or(
+            (uint32_t *)&cqe64->imm_inval_pkey, be_mask, __NV_ATOMIC_ACQUIRE, __NV_THREAD_SCOPE_SYSTEM);
+        is_ready = !(imm_val >> 31);
+    } while (!is_ready);
+    uint32_t rq_wqe_num = __ldg(&ep->rx_wqe_num);
+    uint32_t half_rq_wqe_num = rq_wqe_num >> 1;
+    uint32_t check_index = cons_index + rq_wqe_num + 1;
 
-    // 2. Prepare mask for Logical LSB (bit 0) in Big Endian memory
-    
-    uint32_t be_mask = 0x01000000;
-    // 3. Atomically OR the bit. Returns OLD value.
-    uint32_t old_raw_val = __nv_atomic_fetch_or(imm_ptr, be_mask, __NV_ATOMIC_ACQUIRE, __NV_THREAD_SCOPE_DEVICE);
-
-    // 4. Check if we won the race
-    // If bit was 0 (unset) in old value, we successfully transitioned it to 1.
-    if ((old_raw_val & be_mask) == 0) {
-        // We won!
-        /* Make sure we don't read a too advanced CQE */
-        [[unlikely]] if (cqe_ci < READ_ONCE(ep->rx_cq_ci)) {
-            atomicAnd(imm_ptr, ~be_mask);
-            return 0;
-        }
-
-        /* Process Signal work
-         * Layout (MSB -> LSB):
-         * | Signal ID (10b) | Signal Value (20b) | Signal OP (1b) | Processed (1b) |
-         */
-        uint32_t received_imm, signal_op, signal_val, signal_id;
-        received_imm = doca_gpu_dev_verbs_bswap32(old_raw_val); 
-        signal_op  = (received_imm >> 1)  & 0x1;
-        signal_val = (received_imm >> 2)  & 0xFFFFF;
-        signal_id  = (received_imm >> 22) & 0x3FF;
-        
-        if (signal_op == UCT_RC_GDAKI_SIGNAL_OP_ADD) {
-            signal_ptr[signal_id] += signal_val;
-        } else {
-            signal_ptr[signal_id] = signal_val;
-        }
-        /* SRQ DBR UPDATE for WQE */
-        // To replenish the SRQ (allow NIC to reuse the WQE we just consumed),
-
-        // We maintain the PI counter locally to avoid reading the DBR from host memory.
-        uint32_t old_pi = ep->rx_wq_pi ;
-        ep->rx_wq_pi += 1;
-        uint32_t half_rq_wqe_num = ep->rx_wqe_num >> 1;
-        uint32_t check_index = old_pi + 1;
-        // Doorbell Record Update (Store Release)
-
-        [[unlikely]] if ((check_index & (half_rq_wqe_num - 1)) == 0) {
-            uint32_t new_pi = check_index;
+    [[unlikely]] if ((check_index & (half_rq_wqe_num - 1)) == 0) {
+        uint32_t new_index = check_index;
+        uint32_t old_index = __nv_atomic_fetch_max(
+            (uint32_t *)&ep->rx_wq_pi, new_index, __NV_ATOMIC_RELAXED, __NV_THREAD_SCOPE_DEVICE);
+        if (old_index < new_index) {
+            uint32_t dbrec_val = (old_index + half_rq_wqe_num) & 0xFFFF;
             __nv_atomic_store_n(
-                (uint32_t*)ep->rx_dbrec_p,                      // ptr
-                doca_gpu_dev_verbs_bswap32(new_pi),         // val
-                __NV_ATOMIC_RELEASE,                            // order
-                __NV_THREAD_SCOPE_DEVICE                        // scope
-            );
+                (uint32_t*)ep->rx_dbrec_p, doca_gpu_dev_verbs_bswap32(dbrec_val), __NV_ATOMIC_RELEASE, __NV_THREAD_SCOPE_DEVICE);
         }
-
-        // 6. Advance CQ consumer index
-        __nv_atomic_add(&ep->rx_cq_ci, 1, __NV_ATOMIC_RELEASE, __NV_THREAD_SCOPE_DEVICE);
-
-        return 1;
     }
+
+    // Process signal data
+    // Layout: | Signal ID (10b) [31-22] | Signal Value (20b) [21-2] | Signal OP (1b) [1] | Processed (1b) [0] |
+    uint32_t received_imm = doca_gpu_dev_verbs_bswap32(imm_val);
+    sig_op = (received_imm >> 1) & 0x1;
+    sig_val = (received_imm >> 2) & 0xFFFFF;
+    sig_id = (received_imm >> 22) & 0x3FF;
     
-    return 0;
+    if (sig_op == UCT_RC_GDAKI_SIGNAL_OP_ADD) {
+        signal_ptr[sig_id] += sig_val;
+    } else {
+        signal_ptr[sig_id] = sig_val;
+    }
+
+    return 1;
 }
 
 #endif
