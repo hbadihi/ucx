@@ -779,12 +779,12 @@ UCS_F_DEVICE int uct_rc_mlx5_gda_poll_recv_cq(uct_rc_gdaki_dev_ep_t *ep, uint32_
     uint16_t sig_id;
     uint32_t sig_val;
     uint32_t imm_val;
-    uint32_t be_mask = 0x80000000;
+    uint32_t be_mask = 0x01000000;  // Target bit 24 (LE bit 0 after bswap)
     do
     {
         imm_val = __nv_atomic_fetch_or(
             (uint32_t *)&cqe64->imm_inval_pkey, be_mask, __NV_ATOMIC_ACQUIRE, __NV_THREAD_SCOPE_SYSTEM);
-            is_ready = !((imm_val >> 24) & 1);
+            is_ready = !((imm_val >> 24) & 1);  // Check bit 24 instead of 31
     } while (!is_ready);
     uint32_t rq_wqe_num = __ldg(&ep->rx_wqe_num);
     uint32_t half_rq_wqe_num = rq_wqe_num >> 1;
