@@ -22,19 +22,15 @@
 
 class ucp_perf_cuda_request_manager {
 public:
-    using size_type = uint8_t;
-
     __device__
     ucp_perf_cuda_request_manager(const ucx_perf_cuda_context &ctx,
-                                  ucp_device_request_t *requests,
+                                  ucp_device_request_t *request,
                                   unsigned global_thread_id)
         : m_size(ctx.max_outstanding),
           m_fc_window(ctx.device_fc_window),
-          m_reqs_count(ucs_div_round_up(m_size, m_fc_window)),
           m_channel_mode(ctx.channel_mode),
           m_pending_count(0),
-          m_requests(requests),
-          m_pending_map(0)
+          m_request(request)
     {
 #ifdef HAVE_CURAND
         if (ctx.channel_mode == UCX_PERF_CHANNEL_MODE_RANDOM) {
@@ -42,66 +38,49 @@ public:
                         &m_rand_state);
         }
 #endif
-        assert(m_size <= CAPACITY);
-        for (size_type i = 0; i < m_reqs_count; ++i) {
-            m_pending[i] = 0;
-        }
+        assert(m_size > 0);
+        assert(m_fc_window > 0);
     }
 
-    template<ucs_device_level_t level, bool fc, size_type reuse>
-    __device__ inline ucs_status_t progress_one(size_type &index)
+    template<ucs_device_level_t level>
+    __device__ inline ucs_status_t progress()
     {
-        for (size_type i = 0; i < m_reqs_count; i++) {
-            if (!reuse && !UCS_BIT_GET(m_pending_map, i)) {
-                continue;
-            }
-            ucs_status_t status = ucp_device_progress_req<level>(&m_requests[i]);
-            if (status == UCS_INPROGRESS) {
-                continue;
-            }
-            index = i;
-            if constexpr (fc || !reuse) {
-                m_pending_count -= (m_pending[index] - reuse);
-                m_pending[index] = reuse;
-                m_pending_map   &= ~UCS_BIT(index);
-            }
-            return status;
+        ucs_status_t status = ucp_device_progress_req<level>(m_request);
+
+        if (status != UCS_INPROGRESS) {
+            m_pending_count = 0;
         }
-        return UCS_INPROGRESS;
+
+        return status;
     }
 
-    template<ucs_device_level_t level, bool fc>
+    template<ucs_device_level_t level, bool force_request>
     __device__ inline ucs_status_t get_request(ucp_device_request_t *&req,
                                                ucp_device_flags_t &flags)
     {
-        size_type index;
         if (m_pending_count == m_size) {
             ucs_status_t status;
             do {
-                status = progress_one<level, fc, 1>(index);
+                status = progress<level>();
             } while (status == UCS_INPROGRESS);
 
             if (ucs_unlikely(status != UCS_OK)) {
                 ucs_device_error("progress failed: %d", status);
                 return status;
             }
-        } else {
-            index = __ffs(~m_pending_map) - 1;
-            ++m_pending[index];
-            ++m_pending_count;
         }
 
-        if (fc && (m_pending_count < m_size) && (m_pending[index] < m_fc_window)) {
-            req   = nullptr;
-            flags = static_cast<ucp_device_flags_t>(0);
-        } else {
-            req            = &m_requests[index];
-            m_pending_map |= UCS_BIT(index);
-        }
+        ++m_pending_count;
+        /* Completion of the last operation retires the ordered D2P window. */
+        req = (force_request || (m_pending_count == m_size)) ? m_request :
+                                                                  nullptr;
+        flags = ((req != nullptr) || ((m_pending_count % m_fc_window) == 0)) ?
+                        UCP_DEVICE_FLAG_NODELAY :
+                        static_cast<ucp_device_flags_t>(0);
         return UCS_OK;
     }
 
-    __device__ inline size_type get_pending_count() const
+    __device__ inline unsigned get_pending_count() const
     {
         return m_pending_count;
     }
@@ -126,16 +105,11 @@ public:
     }
 
 private:
-    static const size_type CAPACITY = 32;
-
-    const size_type               m_size;
-    const size_type               m_fc_window;
-    const size_type               m_reqs_count;
+    const unsigned                m_size;
+    const unsigned                m_fc_window;
     const ucx_perf_channel_mode_t m_channel_mode;
-    size_type                     m_pending_count;
-    ucp_device_request_t          *m_requests;
-    uint32_t                      m_pending_map;
-    uint8_t                       m_pending[CAPACITY];
+    unsigned                      m_pending_count;
+    ucp_device_request_t          *m_request;
 #ifdef HAVE_CURAND
     mutable curandState           m_rand_state;
 #endif
@@ -285,7 +259,7 @@ ucp_perf_cuda_send_sync(ucp_perf_cuda_params &params, ucx_perf_counter_t idx,
     return status;
 }
 
-template<ucs_device_level_t level, ucx_perf_cmd_t cmd, bool fc>
+template<ucs_device_level_t level, ucx_perf_cmd_t cmd, bool force_request>
 UCS_F_DEVICE ucs_status_t
 ucp_perf_cuda_put_bw_iter(const ucp_perf_cuda_params &params,
                           ucp_perf_cuda_request_manager &req_mgr,
@@ -294,7 +268,7 @@ ucp_perf_cuda_put_bw_iter(const ucp_perf_cuda_params &params,
     ucp_device_flags_t flags = UCP_DEVICE_FLAG_NODELAY;
     ucp_device_request_t *req;
 
-    ucs_status_t status = req_mgr.get_request<level, fc>(req, flags);
+    ucs_status_t status = req_mgr.get_request<level, force_request>(req, flags);
     if (ucs_unlikely(status != UCS_OK)) {
         return status;
     }
@@ -303,7 +277,7 @@ ucp_perf_cuda_put_bw_iter(const ucp_perf_cuda_params &params,
     return ucp_perf_cuda_send_async<level, cmd>(params, idx, req, channel_id, flags);
 }
 
-template<ucs_device_level_t level, ucx_perf_cmd_t cmd, bool fc>
+template<ucs_device_level_t level, ucx_perf_cmd_t cmd>
 UCS_F_DEVICE ucs_status_t
 ucp_perf_cuda_put_bw_kernel_impl(ucx_perf_cuda_context &ctx,
                                  const ucp_perf_cuda_params &params,
@@ -314,8 +288,8 @@ ucp_perf_cuda_put_bw_kernel_impl(ucx_perf_cuda_context &ctx,
     ucs_status_t status;
 
     for (ucx_perf_counter_t idx = 0; idx < (max_iters - 1); idx++) {
-        status = ucp_perf_cuda_put_bw_iter<level, cmd, fc>(params, req_mgr, ctx,
-                                                           idx);
+        status = ucp_perf_cuda_put_bw_iter<level, cmd, false>(params, req_mgr,
+                                                              ctx, idx);
         if (ucs_unlikely(UCS_STATUS_IS_ERR(status))) {
             ucs_device_error("send failed: %d", status);
             return status;
@@ -326,16 +300,15 @@ ucp_perf_cuda_put_bw_kernel_impl(ucx_perf_cuda_context &ctx,
     }
 
     /* Last iteration */
-    status = ucp_perf_cuda_put_bw_iter<level, cmd, false>(params, req_mgr, ctx,
-                                                          max_iters - 1);
+    status = ucp_perf_cuda_put_bw_iter<level, cmd, true>(params, req_mgr, ctx,
+                                                         max_iters - 1);
     if (ucs_unlikely(UCS_STATUS_IS_ERR(status))) {
         ucs_device_error("final send failed: %d", status);
         return status;
     }
 
     while (req_mgr.get_pending_count() > 0) {
-        uint8_t index;
-        status = req_mgr.progress_one<level, fc, 0>(index);
+        status = req_mgr.progress<level>();
         if (UCS_STATUS_IS_ERR(status)) {
             ucs_device_error("final progress failed: %d", status);
             return status;
@@ -353,21 +326,14 @@ ucp_perf_cuda_put_bw_kernel(ucx_perf_cuda_context &ctx,
 {
     extern __shared__ ucp_device_request_t shared_requests[];
     unsigned thread_index      = ucx_perf_cuda_thread_index<level>(threadIdx.x);
-    unsigned reqs_count        = ucs_div_round_up(ctx.max_outstanding,
-                                                  ctx.device_fc_window);
     unsigned global_thread_id  = ucx_perf_cuda_thread_index<level>(
         thread_index + blockIdx.x * blockDim.x);
-    ucp_device_request_t *reqs = &shared_requests[reqs_count * thread_index];
+    ucp_device_request_t *req  = &shared_requests[thread_index];
 
-    ucp_perf_cuda_request_manager req_mgr(ctx, reqs, global_thread_id);
+    ucp_perf_cuda_request_manager req_mgr(ctx, req, global_thread_id);
 
-    if (ctx.device_fc_window > 1) {
-        ctx.status = ucp_perf_cuda_put_bw_kernel_impl<level, cmd, true>(
-                                                        ctx, params, req_mgr);
-    } else {
-        ctx.status = ucp_perf_cuda_put_bw_kernel_impl<level, cmd, false>(
-                                                        ctx, params, req_mgr);
-    }
+    ctx.status = ucp_perf_cuda_put_bw_kernel_impl<level, cmd>(ctx, params,
+                                                              req_mgr);
 }
 
 template<ucs_device_level_t level, ucx_perf_cmd_t cmd>
@@ -459,6 +425,13 @@ public:
 
     ucs_status_t run_stream_uni()
     {
+        if ((m_perf.params.device_channel_mode ==
+             UCX_PERF_CHANNEL_MODE_RANDOM) &&
+            (m_perf.params.max_outstanding > 1)) {
+            ucs_error("whole-window completion requires a fixed device channel");
+            return UCS_ERR_UNSUPPORTED;
+        }
+
         unsigned my_index = rte_call(&m_perf, group_index);
         ucp_perf_cuda_params_handler params_handler(m_perf);
 

@@ -134,12 +134,10 @@ __host__ UCS_F_DEVICE unsigned ucx_perf_cuda_thread_index(size_t tid)
 
 #define UCX_PERF_KERNEL_DISPATCH_CMD_LEVEL(_cmd, _level, _perf, _kernel, ...) \
     do { \
-        unsigned _blocks     = _perf.params.device_block_count; \
-        unsigned _threads    = _perf.params.device_thread_count; \
-        unsigned _reqs_count = ucs_div_round_up(_perf.params.max_outstanding, \
-                                                _perf.params.device_fc_window); \
-        size_t _shared_size  = _reqs_count * sizeof(ucp_device_request_t) * \
-                               ucx_perf_cuda_thread_index<_level>(_threads); \
+        unsigned _blocks    = _perf.params.device_block_count; \
+        unsigned _threads   = _perf.params.device_thread_count; \
+        size_t _shared_size = sizeof(ucp_device_request_t) * \
+                              ucx_perf_cuda_thread_index<_level>(_threads); \
         _kernel<_level, _cmd><<<_blocks, _threads, _shared_size>>>(__VA_ARGS__); \
     } while (0)
 
