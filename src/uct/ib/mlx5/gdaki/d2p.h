@@ -15,6 +15,11 @@ typedef struct {
 } uct_ib_d2p_gpu_channel_t;
 
 typedef struct {
+    uct_ib_d2p_gpu_channel_t *ch;
+    unsigned long long       pi;
+} uct_ib_d2p_completion_t;
+
+typedef struct {
     uint8_t                  channel_mask;
     uint8_t                  log_depth;
     uint8_t                  pad[2];
