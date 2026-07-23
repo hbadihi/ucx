@@ -21,7 +21,8 @@ UCS_F_DEVICE ucs_status_t uct_ib_d2p_post_desc(uct_ib_d2p_gpu_ep_t *ep,
                                                uint8_t opcode, uint32_t length,
                                                uint32_t lkey, uint64_t laddr,
                                                uint32_t rkey, uint64_t raddr,
-                                               uint64_t add, uint16_t flags)
+                                               uint64_t add, uint16_t flags,
+                                               uct_device_completion_t *tl_comp)
 {
     ucs_status_t status = UCS_INPROGRESS;
     unsigned lane_id, num_lanes;
@@ -37,12 +38,17 @@ UCS_F_DEVICE ucs_status_t uct_ib_d2p_post_desc(uct_ib_d2p_gpu_ep_t *ep,
         for (;;) {
             unsigned long long ci = READ_ONCE(*ch->ci);
             if (static_cast<long long>(pi - ci) >= depth) {
+                printf("no resource\n");
                 status = UCS_ERR_NO_RESOURCE;
                 break;
             }
 
             unsigned long long prev = atomicCAS(ch->pi, pi, pi + 1);
             if (prev == pi) {
+                if (tl_comp != nullptr) {
+                    tl_comp->d2p.ch = ch;
+                    tl_comp->d2p.pi = pi;
+                }
                 break;
             }
             pi = prev;
@@ -94,7 +100,7 @@ UCS_F_DEVICE ucs_status_t uct_ib_d2p_ep_put(
                                        length, src_ib->lkey,
                                        reinterpret_cast<uint64_t>(address),
                                        rem_ib->rkey, remote_address, 0,
-                                       desc_flags);
+                                       desc_flags, comp);
 }
 
 template<ucs_device_level_t level>
@@ -116,14 +122,18 @@ UCS_F_DEVICE ucs_status_t uct_ib_d2p_ep_atomic_add(
                                        ep->iface->atomic_result_lkey,
                                        ep->iface->atomic_result_va,
                                        rem_ib->rkey, remote_address, inc_value,
-                                       desc_flags);
+                                       desc_flags, comp);
 }
 
 template<ucs_device_level_t level>
 UCS_F_DEVICE ucs_status_t uct_ib_d2p_ep_check_completion(
-        uct_device_ep_h tl_ep, uct_device_completion_t *comp)
+        uct_device_ep_h, uct_device_completion_t *tl_comp)
 {
-    return UCS_OK;
+    uct_ib_d2p_completion_t *comp = &tl_comp->d2p;
+    unsigned long long ci         = READ_ONCE(*comp->ch->ci);
+
+    return (static_cast<long long>(ci - comp->pi) > 0) ? UCS_OK :
+                                                         UCS_INPROGRESS;
 }
 
 #endif /* UCT_D2P_CUH_ */
