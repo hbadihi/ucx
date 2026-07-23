@@ -43,6 +43,9 @@ union uct_device_completion {
 #if UCT_CUDA_IPC_SUPPORTED
     uct_cuda_ipc_completion_t cuda_ipc;
 #endif
+#if UCT_D2P_SUPPORTED
+    uct_ib_d2p_completion_t   d2p;
+#endif
 };
 
 
