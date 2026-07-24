@@ -15,45 +15,16 @@
 #include <ucs/sys/device_code.h>
 
 
-UCS_F_DEVICE void uct_ib_d2p_store_relaxed_b128(volatile void *dst,
-                                                const void *src)
+UCS_F_DEVICE void uct_ib_d2p_store_relaxed_u64(volatile uint64_t *dst,
+                                               uint64_t value)
 {
-    const uint64_t *src64 = reinterpret_cast<const uint64_t*>(src);
-    const uint64_t val_lo = src64[0];
-    const uint64_t val_hi = src64[1];
-
 #ifdef __NVCC__
-    asm volatile(R"(
-        .reg .b128 _v%=;
-        mov.b128 _v%=, {%1, %2};
-        st.relaxed.sys.global.b128 [%0], _v%=;
-    )" :: "l"(dst), "l"(val_lo), "l"(val_hi) : "memory");
+    asm volatile("st.relaxed.sys.global.u64 [%0], %1;"
+                 :
+                 : "l"(dst), "l"(value)
+                 : "memory");
 #else
-    volatile uint64_t *dst64 = reinterpret_cast<volatile uint64_t*>(dst);
-
-    dst64[0] = val_lo;
-    dst64[1] = val_hi;
-#endif
-}
-
-UCS_F_DEVICE void uct_ib_d2p_store_release_b128(volatile void *dst,
-                                                const void *src)
-{
-    const uint64_t *src64 = reinterpret_cast<const uint64_t*>(src);
-    const uint64_t val_lo = src64[0];
-    const uint64_t val_hi = src64[1];
-
-#ifdef __NVCC__
-    asm volatile(R"(
-        .reg .b128 _v%=;
-        mov.b128 _v%=, {%1, %2};
-        st.release.sys.global.b128 [%0], _v%=;
-    )" :: "l"(dst), "l"(val_lo), "l"(val_hi) : "memory");
-#else
-    volatile uint64_t *dst64 = reinterpret_cast<volatile uint64_t*>(dst);
-
-    dst64[0] = val_lo;
-    dst64[1] = val_hi;
+    *dst = value;
 #endif
 }
 
@@ -82,7 +53,14 @@ UCS_F_DEVICE ucs_status_t uct_ib_d2p_post_desc(uct_ib_d2p_gpu_ep_t *ep,
 
         // start_reserve_time = clock64();
         pi = atomicAdd(ch->pi, 1ULL);
-        while (static_cast<long long>(pi - READ_ONCE(*ch->ci)) >= depth) {
+        unsigned long long cached_ci = ch->ci_shadow;
+        while (static_cast<long long>(pi - cached_ci) >= depth) {
+            cached_ci     = READ_ONCE(*ch->ci);
+            ch->ci_shadow = cached_ci;
+            if (static_cast<long long>(pi - cached_ci) < depth) {
+                break;
+            }
+        //     printf("no resource\n");
         }
 
         if (tl_comp != nullptr) {
@@ -97,24 +75,18 @@ UCS_F_DEVICE ucs_status_t uct_ib_d2p_post_desc(uct_ib_d2p_gpu_ep_t *ep,
                                       ch->queue_base) +
                               slot;
             uct_ib_d2p_desc_t desc = {};
+            const uint8_t owner = (pi >> iface->log_depth) &
+                                  UCT_IB_D2P_OWNER_MASK;
 
-            desc.owner  = (pi >> iface->log_depth) & 0x1;
-            desc.opcode = opcode;
-            desc.flags  = flags;
-            desc.length = length;
-            desc.ep_idx = ep->ep_idx;
-            desc.lkey   = lkey;
-            desc.rkey   = rkey;
-            desc.laddr  = laddr;
-            desc.raddr  = raddr;
-            desc.add    = add;
+            uct_ib_d2p_desc_pack(&desc, owner, opcode, flags, length,
+                                 ep->ep_idx, lkey, rkey, laddr, raddr, add);
 
-            auto dst = reinterpret_cast<volatile uint8_t*>(queue_desc);
-            auto src = reinterpret_cast<const uint8_t*>(&desc);
+            auto dst = reinterpret_cast<volatile uint64_t*>(queue_desc);
 
-            uct_ib_d2p_store_relaxed_b128(dst + 16, src + 16);
-            uct_ib_d2p_store_relaxed_b128(dst + 32, src + 32);
-            uct_ib_d2p_store_release_b128(dst, src);
+#pragma unroll
+            for (unsigned i = 0; i < UCT_IB_D2P_DESC_SEG_COUNT; ++i) {
+                uct_ib_d2p_store_relaxed_u64(dst + i, desc.segments[i]);
+            }
         }
         // end_post_time = clock64();
         // printf("reserve time: %.3f us, post time: %.3f us\n",
