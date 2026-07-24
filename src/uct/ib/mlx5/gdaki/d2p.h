@@ -11,6 +11,7 @@
 typedef struct {
     unsigned long long *pi;
     unsigned long long *ci;
+    unsigned long long ci_shadow;
     void               *queue_base;
 } uct_ib_d2p_gpu_channel_t;
 
