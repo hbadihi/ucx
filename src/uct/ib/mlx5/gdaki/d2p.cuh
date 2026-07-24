@@ -33,27 +33,17 @@ UCS_F_DEVICE ucs_status_t uct_ib_d2p_post_desc(uct_ib_d2p_gpu_ep_t *ep,
         auto iface = ep->iface;
         auto ch    = iface->channels + (channel_id & iface->channel_mask);
         const long long depth = UCS_BIT(iface->log_depth);
-        unsigned long long pi = READ_ONCE(*ch->pi);
+        unsigned long long pi;
 
-        for (;;) {
-            unsigned long long ci = READ_ONCE(*ch->ci);
-            if (static_cast<long long>(pi - ci) >= depth) {
-                printf("no resource\n");
-                status = UCS_ERR_NO_RESOURCE;
-                break;
-            }
 
-            unsigned long long prev = atomicCAS(ch->pi, pi, pi + 1);
-            if (prev == pi) {
-                if (tl_comp != nullptr) {
-                    tl_comp->d2p.ch = ch;
-                    tl_comp->d2p.pi = pi;
-                }
-                break;
-            }
-            pi = prev;
+        pi = atomicAdd(ch->pi, 1ULL);
+        while (static_cast<long long>(pi - READ_ONCE(*ch->ci)) >= depth) {
         }
 
+        if (tl_comp != nullptr) {
+            tl_comp->d2p.ch = ch;
+            tl_comp->d2p.pi = pi;
+        }
         if (status == UCS_INPROGRESS) {
             const uint32_t slot = pi & UCS_MASK(iface->log_depth);
             auto desc = reinterpret_cast<volatile uct_ib_d2p_desc_t*>(
