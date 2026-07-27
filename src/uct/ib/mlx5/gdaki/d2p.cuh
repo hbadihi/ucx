@@ -15,6 +15,19 @@
 #include <ucs/sys/device_code.h>
 
 
+UCS_F_DEVICE void uct_ib_d2p_store_relaxed_u64(volatile uint64_t *dst,
+                                               uint64_t value)
+{
+#ifdef __NVCC__
+    asm volatile("st.relaxed.sys.global.u64 [%0], %1;"
+                 :
+                 : "l"(dst), "l"(value)
+                 : "memory");
+#else
+    *dst = value;
+#endif
+}
+
 template<ucs_device_level_t level>
 UCS_F_DEVICE ucs_status_t uct_ib_d2p_post_desc(uct_ib_d2p_gpu_ep_t *ep,
                                                unsigned channel_id,
@@ -55,22 +68,22 @@ UCS_F_DEVICE ucs_status_t uct_ib_d2p_post_desc(uct_ib_d2p_gpu_ep_t *ep,
 
         if (status == UCS_INPROGRESS) {
             const uint32_t slot = pi & UCS_MASK(iface->log_depth);
-            auto desc = reinterpret_cast<volatile uct_ib_d2p_desc_t*>(
-                                ch->queue_base) +
-                        slot;
+            auto queue_desc = reinterpret_cast<volatile uct_ib_d2p_desc_t*>(
+                                      ch->queue_base) +
+                              slot;
+            uct_ib_d2p_desc_t desc = {};
+            const uint8_t owner = (pi >> iface->log_depth) &
+                                  UCT_IB_D2P_OWNER_MASK;
 
-            desc->opcode         = opcode;
-            desc->length         = length;
-            desc->ep_idx         = ep->ep_idx;
-            desc->lkey           = lkey;
-            desc->laddr          = laddr;
-            desc->rkey           = rkey;
-            desc->raddr          = raddr;
-            desc->add            = add;
-            desc->flags          = flags;
-            const uint32_t owner = (pi >> iface->log_depth) & 0x1;
-            asm volatile("st.release.sys.global.u8 [%0], %1;" ::
-                         "l"(&desc->owner), "r"(owner) : "memory");
+            uct_ib_d2p_desc_pack(&desc, owner, opcode, flags, length,
+                                 ep->ep_idx, lkey, rkey, laddr, raddr, add);
+
+            auto dst = reinterpret_cast<volatile uint64_t*>(queue_desc);
+
+#pragma unroll
+            for (unsigned i = 0; i < UCT_IB_D2P_DESC_SEG_COUNT; ++i) {
+                uct_ib_d2p_store_relaxed_u64(dst + i, desc.segments[i]);
+            }
         }
     }
 
