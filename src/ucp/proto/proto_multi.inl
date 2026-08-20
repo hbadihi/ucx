@@ -368,10 +368,27 @@ ucp_proto_am_zcopy_multi_common_send_func(
                            &req->send.state.uct_comp);
 }
 
+static UCS_F_ALWAYS_INLINE void
+ucp_proto_multi_set_rand_lane_idx(ucp_request_t *req,
+                                  const ucp_proto_multi_priv_t *mpriv)
+{
+    ucp_worker_h worker = req->send.ep->worker;
+
+    req->send.multi_lane_idx = rand_r(&worker->rand_seed) % mpriv->num_lanes;
+}
+
 static UCS_F_ALWAYS_INLINE ucs_status_t
 ucp_proto_multi_rma_init_func(ucp_request_t *req)
 {
     const ucp_proto_multi_priv_t *mpriv = req->send.proto_config->priv;
+    const ucp_proto_select_param_t *select_param =
+            &req->send.proto_config->select_param;
+
+    if ((mpriv->num_lanes > 1) &&
+        (ucp_proto_select_op_attr_unpack(select_param->op_attr) &
+         UCP_OP_ATTR_FLAG_MULTI_SEND)) {
+        ucp_proto_multi_set_rand_lane_idx(req, mpriv);
+    }
 
     return ucp_ep_rma_handle_fence(req->send.ep, req, mpriv->lane_map);
 }
