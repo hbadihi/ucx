@@ -32,6 +32,7 @@
 #include <ucs/datastruct/queue.h>
 #include <ucs/type/cpu_set.h>
 #include <ucs/type/serialize.h>
+#include <ucs/sys/math.h>
 #include <ucs/sys/string.h>
 #include <ucs/arch/atomic.h>
 #include <ucs/vfs/base/vfs_cb.h>
@@ -2716,6 +2717,7 @@ ucs_status_t ucp_worker_create(ucp_context_h context,
     worker->fence_seq            = 0;
     worker->inprogress           = 0;
     worker->arm_block_count      = 0;
+    worker->rand_seed            = ucs_rand();
     worker->num_active_ifaces    = 0;
     worker->num_ifaces           = 0;
     worker->am_message_id        = ucs_generate_uuid(0);
