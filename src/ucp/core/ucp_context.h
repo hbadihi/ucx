@@ -534,6 +534,9 @@ typedef struct ucp_context {
     /* Next memory handle registration identifier */
     uint64_t                      next_memh_reg_id;
 
+    /* Multi-send RMA start lane sequence of the next created worker */
+    uint32_t                      worker_lane_seq;
+
     /* Save cached uct configurations */
     ucs_list_link_t               cached_key_list;
 } ucp_context_t;

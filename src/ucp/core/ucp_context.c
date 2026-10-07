@@ -3003,6 +3003,7 @@ ucs_status_t ucp_init_version(unsigned api_major_version, unsigned api_minor_ver
 
     context->uuid             = ucs_generate_uuid((uintptr_t)context);
     context->next_memh_reg_id = 0;
+    context->worker_lane_seq  = 0;
 
     if (config->enable_rcache != UCS_NO) {
         status = ucp_mem_rcache_init(context, &config->rcache_config);

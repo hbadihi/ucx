@@ -582,6 +582,21 @@ ucp_proto_multi_aggregate_perf(const ucp_proto_multi_init_params_t *params,
     *min_bandwidth_p  = min_bandwidth;
 }
 
+/* Check whether all lanes of the protocol have the same weight */
+static int
+ucp_proto_multi_lanes_equal_weight(const ucp_proto_multi_priv_t *mpriv)
+{
+    ucp_lane_index_t lane_idx;
+
+    for (lane_idx = 1; lane_idx < mpriv->num_lanes; ++lane_idx) {
+        if (mpriv->lanes[lane_idx].weight != mpriv->lanes[0].weight) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
 /* Initialize multi-lane private data and relative weights */
 static ucs_status_t
 ucp_proto_multi_init_priv(const ucp_proto_multi_init_params_t *params,
@@ -715,6 +730,14 @@ ucp_proto_multi_init_priv(const ucp_proto_multi_init_params_t *params,
         }
     }
     ucs_assert(mpriv->num_lanes == ucs_popcount(selection->lane_map));
+
+    /* Spread single-fragment multi-send requests over homogeneous lanes */
+    mpriv->rr_start_lane =
+            (mpriv->num_lanes > 1) &&
+            (ucp_proto_select_op_attr_unpack(
+                     params->super.super.select_param->op_attr) &
+             UCP_OP_ATTR_FLAG_MULTI_SEND) &&
+            ucp_proto_multi_lanes_equal_weight(mpriv);
 
     if (params->use_single_lane_min_length) {
         perf->min_length = mpriv->min_frag;

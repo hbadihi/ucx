@@ -373,6 +373,11 @@ ucp_proto_multi_rma_init_func(ucp_request_t *req)
 {
     const ucp_proto_multi_priv_t *mpriv = req->send.proto_config->priv;
 
+    if (mpriv->rr_start_lane) {
+        req->send.multi_lane_idx = req->send.ep->worker->multi_send_lane_seq++ %
+                                   mpriv->num_lanes;
+    }
+
     return ucp_ep_rma_handle_fence(req->send.ep, req, mpriv->lane_map);
 }
 

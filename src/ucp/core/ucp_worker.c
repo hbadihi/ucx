@@ -2715,6 +2715,8 @@ ucs_status_t ucp_worker_create(ucp_context_h context,
     worker->flush_ops_count      = 0;
     worker->fence_seq            = 0;
     worker->inprogress           = 0;
+    worker->multi_send_lane_seq  = ucs_atomic_fadd32(&context->worker_lane_seq,
+                                                     1);
     worker->arm_block_count      = 0;
     worker->num_active_ifaces    = 0;
     worker->num_ifaces           = 0;
