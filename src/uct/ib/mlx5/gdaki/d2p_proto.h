@@ -7,6 +7,7 @@
 #define UCT_D2P_PROTO_H_
 
 #include <ucs/sys/compiler_def.h>
+#include <stdint.h>
 
 
 enum {
@@ -19,6 +20,12 @@ enum {
     UCT_IB_D2P_FLAG_CQ_UPDATE = UCS_BIT(0),
     UCT_IB_D2P_FLAG_RING_DB   = UCS_BIT(1),
 };
+
+
+#define UCT_IB_D2P_QP_STATUS_ERROR UCS_BIT(63)
+
+
+typedef uint64_t uct_ib_d2p_qp_status_t;
 
 
 typedef struct {

@@ -6,12 +6,15 @@
 #ifndef UCT_D2P_H_
 #define UCT_D2P_H_
 
+#include "d2p_proto.h"
+
 #include <uct/api/device/uct_device_types.h>
 
 typedef struct {
-    unsigned long long *pi;
-    unsigned long long *ci;
-    void               *queue_base;
+    unsigned long long     *pi;
+    unsigned long long     *ci;
+    uct_ib_d2p_qp_status_t *qp_status;
+    void                   *queue_base;
 } uct_ib_d2p_gpu_channel_t;
 
 typedef struct {
@@ -27,7 +30,13 @@ typedef struct {
     uct_device_ep_t        super;
     uct_ib_d2p_gpu_iface_t *iface;
     uint64_t               ep_idx;
-    uint8_t                pad[8];
+    uint32_t               base_uidx;
+    uint8_t                pad[4];
 } uct_ib_d2p_gpu_ep_t;
+
+typedef struct {
+    uint64_t pi;
+    unsigned channel_id;
+} uct_ib_d2p_completion_t;
 
 #endif /* UCT_D2P_H_ */
