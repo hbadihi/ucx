@@ -56,7 +56,7 @@ UCS_F_DEVICE ucs_status_t uct_ib_d2p_post_desc(uct_ib_d2p_gpu_ep_t *ep,
 
             desc->opcode         = opcode;
             desc->length         = length;
-            desc->ep_idx         = ep->ep_idx;
+            desc->dpa_ep_addr    = ep->dpa_ep_addr;
             desc->lkey           = lkey;
             desc->laddr          = laddr;
             desc->rkey           = rkey;
