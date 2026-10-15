@@ -26,7 +26,7 @@ typedef struct {
     uint8_t  opcode;
     uint16_t flags;
     uint32_t length;
-    uint64_t ep_idx;
+    uint64_t dpa_ep_addr;
     uint32_t lkey;
     uint32_t rkey;
     uint64_t laddr;
