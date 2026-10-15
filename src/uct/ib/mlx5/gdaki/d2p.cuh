@@ -21,7 +21,8 @@ UCS_F_DEVICE ucs_status_t uct_ib_d2p_post_desc(uct_ib_d2p_gpu_ep_t *ep,
                                                uint8_t opcode, uint32_t length,
                                                uint32_t lkey, uint64_t laddr,
                                                uint32_t rkey, uint64_t raddr,
-                                               uint64_t add, uint16_t flags)
+                                               uint64_t add, uint16_t flags,
+                                               uct_device_completion_t *comp)
 {
     ucs_status_t status = UCS_INPROGRESS;
     unsigned lane_id, num_lanes;
@@ -63,6 +64,10 @@ UCS_F_DEVICE ucs_status_t uct_ib_d2p_post_desc(uct_ib_d2p_gpu_ep_t *ep,
             desc->raddr          = raddr;
             desc->add            = add;
             desc->flags          = flags;
+            if (comp != nullptr) {
+                comp->d2p.pi         = pi;
+                comp->d2p.channel_id = channel_id & iface->channel_mask;
+            }
             const uint32_t owner = (pi >> iface->log_depth) & 0x1;
             asm volatile("st.release.sys.global.u8 [%0], %1;" ::
                          "l"(&desc->owner), "r"(owner) : "memory");
@@ -94,7 +99,7 @@ UCS_F_DEVICE ucs_status_t uct_ib_d2p_ep_put(
                                        length, src_ib->lkey,
                                        reinterpret_cast<uint64_t>(address),
                                        rem_ib->rkey, remote_address, 0,
-                                       desc_flags);
+                                       desc_flags, comp);
 }
 
 template<ucs_device_level_t level>
@@ -116,14 +121,25 @@ UCS_F_DEVICE ucs_status_t uct_ib_d2p_ep_atomic_add(
                                        ep->iface->atomic_result_lkey,
                                        ep->iface->atomic_result_va,
                                        rem_ib->rkey, remote_address, inc_value,
-                                       desc_flags);
+                                       desc_flags, comp);
 }
 
 template<ucs_device_level_t level>
 UCS_F_DEVICE ucs_status_t uct_ib_d2p_ep_check_completion(
         uct_device_ep_h tl_ep, uct_device_completion_t *comp)
 {
-    return UCS_OK;
+    auto ep = reinterpret_cast<uct_ib_d2p_gpu_ep_t*>(tl_ep);
+    auto ch = ep->iface->channels + comp->d2p.channel_id;
+
+    if (static_cast<int64_t>(ucs_device_atomic64_read(
+                                     reinterpret_cast<uint64_t*>(ch->ci)) -
+                             comp->d2p.pi) <= 0) {
+        return UCS_INPROGRESS;
+    }
+
+    return (comp->d2p.pi >= READ_ONCE(ch->err_slots[ep->ep_idx])) ?
+                   UCS_ERR_IO_ERROR :
+                   UCS_OK;
 }
 
 #endif /* UCT_D2P_CUH_ */
