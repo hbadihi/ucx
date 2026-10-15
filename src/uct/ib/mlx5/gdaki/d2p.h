@@ -12,6 +12,7 @@ typedef struct {
     unsigned long long *pi;
     unsigned long long *ci;
     void               *queue_base;
+    uint64_t           *err_slots;
 } uct_ib_d2p_gpu_channel_t;
 
 typedef struct {
@@ -27,7 +28,13 @@ typedef struct {
     uct_device_ep_t        super;
     uct_ib_d2p_gpu_iface_t *iface;
     uint64_t               dpa_ep_addr;
-    uint8_t                pad[8];
+    uint32_t               ep_idx;
+    uint8_t                pad[4];
 } uct_ib_d2p_gpu_ep_t;
+
+typedef struct {
+    uint64_t pi;
+    unsigned channel_id;
+} uct_ib_d2p_completion_t;
 
 #endif /* UCT_D2P_H_ */
